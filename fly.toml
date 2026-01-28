@@ -19,6 +19,10 @@ primary_region = "sjc"
     timeout = 5000
     path = "/health"
 
+[mounts]
+  source = "whatsapp_data"
+  destination = "/data/whatsapp"
+
 [[vm]]
   memory = "512mb"
   cpu_kind = "shared"
@@ -26,5 +30,5 @@ primary_region = "sjc"
 
 [env]
   DATA_DIR = "/data/whatsapp"
-  JO_BOT_URL = "http://jo-bot.internal:8000"
+  JO_BOT_URL = "http://joprod.internal:8000"
   # WHATSAPP_SESSION_KEY set via fly secrets
