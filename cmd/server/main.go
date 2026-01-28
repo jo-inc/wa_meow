@@ -620,6 +620,55 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func setTypingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID  int    `json:"user_id"`
+		ChatJID string `json:"chat_jid"`
+		Typing  bool   `json:"typing"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	var presence types.ChatPresence
+	if req.Typing {
+		presence = types.ChatPresenceComposing
+	} else {
+		presence = types.ChatPresencePaused
+	}
+
+	err = session.Client.SendChatPresence(context.Background(), jid, presence, types.ChatPresenceMediaText)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := 0
 	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
@@ -698,6 +747,7 @@ func main() {
 	http.HandleFunc("/sessions/save", saveSessionHandler)
 	http.HandleFunc("/chats", getChatsHandler)
 	http.HandleFunc("/messages/send", sendMessageHandler)
+	http.HandleFunc("/messages/typing", setTypingHandler)
 	http.HandleFunc("/events", eventsHandler)
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
