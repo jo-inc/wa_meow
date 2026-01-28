@@ -20,6 +20,7 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -620,6 +621,65 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID    int    `json:"user_id"`
+		ChatJID   string `json:"chat_jid"`
+		MessageID string `json:"message_id"`
+		Emoji     string `json:"emoji"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	// Build reaction message
+	msg := &waE2E.Message{
+		ReactionMessage: &waE2E.ReactionMessage{
+			Key: &waCommon.MessageKey{
+				RemoteJID:   proto.String(req.ChatJID),
+				FromMe:      proto.Bool(true),
+				ID:          proto.String(req.MessageID),
+			},
+			Text:              proto.String(req.Emoji),
+			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+		},
+	}
+
+	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
 func setTypingHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -748,6 +808,7 @@ func main() {
 	http.HandleFunc("/chats", getChatsHandler)
 	http.HandleFunc("/messages/send", sendMessageHandler)
 	http.HandleFunc("/messages/typing", setTypingHandler)
+	http.HandleFunc("/messages/react", sendReactionHandler)
 	http.HandleFunc("/events", eventsHandler)
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
