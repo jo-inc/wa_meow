@@ -1,0 +1,26 @@
+# Air config for live-reload
+# Install: go install github.com/air-verse/air@latest
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/whatsapp-server ./cmd/server/main.go"
+  bin = "./tmp/whatsapp-server"
+  delay = 1000
+  exclude_dir = ["tmp", "data", "swift-example"]
+  exclude_regex = ["_test.go"]
+  include_ext = ["go"]
+  kill_delay = "0s"
+
+[log]
+  time = false
+
+[color]
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  clean_on_exit = true

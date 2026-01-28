@@ -1,0 +1,286 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources",
+      "importPath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "WhatsAppBridgeExample",
+      "moduleOutputPath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule",
+      "objects" : [
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o",
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j16",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-Xcc",
+        "-fmodule-map-file=/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/CWhatsApp/module.modulemap",
+        "-module-cache-path",
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "WhatsAppBridgeExample_main",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift_example"
+      ],
+      "outputFileMapPath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift",
+        "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift"
+      ],
+      "tempsPath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "WhatsAppBridgeExample" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "WhatsAppBridgeExample",
+      "-package-name",
+      "swift_example",
+      "-c",
+      "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift",
+      "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift",
+      "-I",
+      "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j16",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-Xcc",
+      "-fmodule-map-file=/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/CWhatsApp/module.modulemap",
+      "-module-cache-path",
+      "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "WhatsAppBridgeExample_main",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift_example",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "WhatsAppBridgeExample" : [
+      "CWhatsApp"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources"
+    },
+    "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    },
+    "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist"
+    },
+    "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList"
+    }
+  }
+}

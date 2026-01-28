@@ -1,0 +1,5 @@
+module CWhatsApp {
+    header "../../../libwhatsapp.h"
+    link "whatsapp"
+    export *
+}

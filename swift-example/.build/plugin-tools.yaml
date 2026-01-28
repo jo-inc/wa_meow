@@ -1,0 +1,84 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "PackageStructure": ["<PackageStructure>"]
+  "WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module": ["<WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module>"]
+  "main": ["<WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module>","<whatsapp-swift-arm64-apple-macosx26.0-debug.exe>"]
+  "test": ["<WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module>","<whatsapp-swift-arm64-apple-macosx26.0-debug.exe>"]
+  "whatsapp-swift-arm64-apple-macosx26.0-debug.exe": ["<whatsapp-swift-arm64-apple-macosx26.0-debug.exe>"]
+default: "main"
+nodes:
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/CWhatsApp/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift":
+    is-mutated: true
+commands:
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources"]
+    description: "Write auxiliary file /Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources"
+
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist"]
+    description: "Write auxiliary file /Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist"
+
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList"
+
+  "<WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module>":
+    tool: phony
+    inputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule"]
+    outputs: ["<WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module>"]
+
+  "<whatsapp-swift-arm64-apple-macosx26.0-debug.exe>":
+    tool: phony
+    inputs: ["<whatsapp-swift-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    outputs: ["<whatsapp-swift-arm64-apple-macosx26.0-debug.exe>"]
+
+  "C.WhatsAppBridgeExample-arm64-apple-macosx26.0-debug.module":
+    tool: shell
+    inputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule"]
+    description: "Compiling Swift Module 'WhatsAppBridgeExample' (2 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","WhatsAppBridgeExample","-emit-dependencies","-emit-module","-emit-module-path","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule","-output-file-map","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/output-file-map.json","-incremental","-c","@/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/sources","-I","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx14.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j16","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-Xcc","-fmodule-map-file=/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/CWhatsApp/module.modulemap","-module-cache-path","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","WhatsAppBridgeExample_main","-swift-version","5","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","swift_example"]
+
+  "C.whatsapp-swift-arm64-apple-macosx26.0-debug.exe":
+    tool: shell
+    inputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList"]
+    outputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/whatsapp-swift"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-L","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug","-o","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift","-module-name","whatsapp_swift","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_WhatsAppBridgeExample_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx14.0","-L","../","-lwhatsapp","-Xlinker","-rpath","-Xlinker","@executable_path/../","-Xlinker","-add_ast_path","-Xlinker","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/Modules/WhatsAppBridgeExample.swiftmodule","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g"]
+
+  "C.whatsapp-swift-arm64-apple-macosx26.0-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist"]
+    outputs: ["<whatsapp-swift-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/whatsapp-swift"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift-entitlement.plist","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/whatsapp-swift"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/CWhatsApp/","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Package.swift","/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

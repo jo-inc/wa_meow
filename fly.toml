@@ -1,0 +1,30 @@
+app = "jo-whatsapp"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[services]]
+  internal_port = 8090
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 8090
+
+  [[services.http_checks]]
+    interval = 30000
+    timeout = 5000
+    path = "/health"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[env]
+  DATA_DIR = "/data/whatsapp"
+  JO_BOT_URL = "http://jo-bot.internal:8000"
+  # WHATSAPP_SESSION_KEY set via fly secrets

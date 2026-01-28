@@ -1,0 +1,19 @@
+{
+  "": {
+    "swift-dependencies": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/master.swiftdeps"
+  },
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/WhatsAppBridge.swift": {
+    "dependencies": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.d",
+    "object": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swift.o",
+    "swiftmodule": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge~partial.swiftmodule",
+    "swift-dependencies": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.swiftdeps",
+    "diagnostics": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/WhatsAppBridge.dia"
+  },
+  "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/Sources/WhatsAppBridgeExample/main.swift": {
+    "dependencies": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.d",
+    "object": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swift.o",
+    "swiftmodule": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.swiftdeps",
+    "diagnostics": "/Users/pradeep/personal/workspace/whatsmeow-cli/swift-example/.build/arm64-apple-macosx/debug/WhatsAppBridgeExample.build/main.dia"
+  }
+}
