@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mdp/qrterminal/v3"
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
@@ -452,9 +451,7 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 		case code := <-session.QRChannel:
 			fmt.Fprintf(w, "event: qr\ndata: %s\n\n", code)
 			flusher.Flush()
-
-			fmt.Println("\n📱 QR Code for user", userID)
-			qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
+			log.Printf("📱 QR code generated for user %s (length: %d)", userID, len(code))
 
 		case <-session.LoginDone:
 			fmt.Fprintf(w, "event: success\ndata: logged_in\n\n")
