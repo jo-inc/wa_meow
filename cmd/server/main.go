@@ -60,6 +60,23 @@ type MessagePayload struct {
 	Text       string `json:"text"`
 	Timestamp  int64  `json:"timestamp"`
 	IsFromMe   bool   `json:"is_from_me"`
+	// Media fields
+	MediaType string `json:"media_type,omitempty"` // "image", "location", etc.
+	MediaURL  string `json:"media_url,omitempty"`
+	MimeType  string `json:"mime_type,omitempty"`
+	Caption   string `json:"caption,omitempty"`
+	// Location fields
+	Latitude  float64 `json:"latitude,omitempty"`
+	Longitude float64 `json:"longitude,omitempty"`
+	// Contact fields (vCard)
+	ContactName  string `json:"contact_name,omitempty"`
+	ContactVCard string `json:"contact_vcard,omitempty"`
+	// Image download info (for downloading media)
+	MediaKey      []byte `json:"media_key,omitempty"`
+	DirectPath    string `json:"direct_path,omitempty"`
+	FileEncSHA256 []byte `json:"file_enc_sha256,omitempty"`
+	FileSHA256    []byte `json:"file_sha256,omitempty"`
+	FileLength    uint64 `json:"file_length,omitempty"`
 }
 
 type ChatPayload struct {
@@ -312,24 +329,128 @@ func (m *SessionManager) SaveSession(userID int) {
 func (s *UserSession) handleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
-		text := ""
-		if v.Message.Conversation != nil {
-			text = *v.Message.Conversation
-		} else if v.Message.ExtendedTextMessage != nil && v.Message.ExtendedTextMessage.Text != nil {
-			text = *v.Message.ExtendedTextMessage.Text
+		payload := MessagePayload{
+			ID:         v.Info.ID,
+			ChatJID:    v.Info.Chat.String(),
+			SenderJID:  v.Info.Sender.String(),
+			SenderName: v.Info.PushName,
+			Timestamp:  v.Info.Timestamp.Unix(),
+			IsFromMe:   v.Info.IsFromMe,
 		}
 
-		if text != "" {
-			payload := MessagePayload{
-				ID:         v.Info.ID,
-				ChatJID:    v.Info.Chat.String(),
-				SenderJID:  v.Info.Sender.String(),
-				SenderName: v.Info.PushName,
-				Text:       text,
-				Timestamp:  v.Info.Timestamp.Unix(),
-				IsFromMe:   v.Info.IsFromMe,
-			}
+		hasContent := false
 
+		// Handle text messages
+		if v.Message.Conversation != nil {
+			payload.Text = *v.Message.Conversation
+			hasContent = true
+		} else if v.Message.ExtendedTextMessage != nil && v.Message.ExtendedTextMessage.Text != nil {
+			payload.Text = *v.Message.ExtendedTextMessage.Text
+			hasContent = true
+		}
+
+		// Handle image messages
+		if img := v.Message.ImageMessage; img != nil {
+			payload.MediaType = "image"
+			if img.Caption != nil {
+				payload.Caption = *img.Caption
+			}
+			if img.Mimetype != nil {
+				payload.MimeType = *img.Mimetype
+			}
+			if img.URL != nil {
+				payload.MediaURL = *img.URL
+			}
+			if img.DirectPath != nil {
+				payload.DirectPath = *img.DirectPath
+			}
+			payload.MediaKey = img.MediaKey
+			payload.FileEncSHA256 = img.FileEncSHA256
+			payload.FileSHA256 = img.FileSHA256
+			if img.FileLength != nil {
+				payload.FileLength = *img.FileLength
+			}
+			hasContent = true
+		}
+
+		// Handle location messages
+		if loc := v.Message.LocationMessage; loc != nil {
+			payload.MediaType = "location"
+			if loc.DegreesLatitude != nil {
+				payload.Latitude = *loc.DegreesLatitude
+			}
+			if loc.DegreesLongitude != nil {
+				payload.Longitude = *loc.DegreesLongitude
+			}
+			if loc.Name != nil {
+				payload.Text = *loc.Name
+			}
+			if loc.Address != nil {
+				if payload.Text != "" {
+					payload.Text += " - " + *loc.Address
+				} else {
+					payload.Text = *loc.Address
+				}
+			}
+			hasContent = true
+		}
+
+		// Handle live location messages
+		if loc := v.Message.LiveLocationMessage; loc != nil {
+			payload.MediaType = "live_location"
+			if loc.DegreesLatitude != nil {
+				payload.Latitude = *loc.DegreesLatitude
+			}
+			if loc.DegreesLongitude != nil {
+				payload.Longitude = *loc.DegreesLongitude
+			}
+			if loc.Caption != nil {
+				payload.Caption = *loc.Caption
+			}
+			hasContent = true
+		}
+
+		// Handle contact messages (single contact)
+		if contact := v.Message.ContactMessage; contact != nil {
+			payload.MediaType = "contact"
+			if contact.DisplayName != nil {
+				payload.ContactName = *contact.DisplayName
+			}
+			if contact.Vcard != nil {
+				payload.ContactVCard = *contact.Vcard
+			}
+			hasContent = true
+		}
+
+		// Handle contact array messages (multiple contacts)
+		if contacts := v.Message.ContactsArrayMessage; contacts != nil {
+			// For multiple contacts, we'll send separate events for each
+			for _, contact := range contacts.Contacts {
+				contactPayload := MessagePayload{
+					ID:         v.Info.ID,
+					ChatJID:    v.Info.Chat.String(),
+					SenderJID:  v.Info.Sender.String(),
+					SenderName: v.Info.PushName,
+					Timestamp:  v.Info.Timestamp.Unix(),
+					IsFromMe:   v.Info.IsFromMe,
+					MediaType:  "contact",
+				}
+				if contact.DisplayName != nil {
+					contactPayload.ContactName = *contact.DisplayName
+				}
+				if contact.Vcard != nil {
+					contactPayload.ContactVCard = *contact.Vcard
+				}
+				select {
+				case s.EventChan <- MessageEvent{Type: "message", Payload: contactPayload}:
+				default:
+					log.Printf("Event channel full for user %d, dropping contact", s.UserID)
+				}
+			}
+			// Don't set hasContent since we've already sent the events
+		}
+
+		if hasContent {
 			select {
 			case s.EventChan <- MessageEvent{Type: "message", Payload: payload}:
 			default:
@@ -579,6 +700,7 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		UserID  int    `json:"user_id"`
 		ChatJID string `json:"chat_jid"`
 		Text    string `json:"text"`
+		ReplyTo string `json:"reply_to,omitempty"` // Optional message ID to reply to
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
@@ -602,8 +724,23 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg := &waE2E.Message{
-		Conversation: proto.String(req.Text),
+	var msg *waE2E.Message
+	if req.ReplyTo != "" {
+		// Use ExtendedTextMessage with ContextInfo for reply
+		msg = &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text: proto.String(req.Text),
+				ContextInfo: &waE2E.ContextInfo{
+					StanzaID:      proto.String(req.ReplyTo),
+					Participant:   proto.String(jid.String()),
+					QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
+				},
+			},
+		}
+	} else {
+		msg = &waE2E.Message{
+			Conversation: proto.String(req.Text),
+		}
 	}
 
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
@@ -780,6 +917,196 @@ func saveSessionHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "saved"})
 }
 
+func sendImageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID   int    `json:"user_id"`
+		ChatJID  string `json:"chat_jid"`
+		ImageB64 string `json:"image_b64"` // Base64 encoded image
+		MimeType string `json:"mime_type"` // e.g. "image/jpeg"
+		Caption  string `json:"caption"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	// Decode base64 image
+	imageData, err := base64.StdEncoding.DecodeString(req.ImageB64)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid base64 image")
+		return
+	}
+
+	// Upload to WhatsApp servers
+	uploaded, err := session.Client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to upload image: "+err.Error())
+		return
+	}
+
+	// Build and send image message
+	msg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption:       proto.String(req.Caption),
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(req.MimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(imageData))),
+		},
+	}
+
+	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
+func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID    int     `json:"user_id"`
+		ChatJID   string  `json:"chat_jid"`
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+		Name      string  `json:"name"`
+		Address   string  `json:"address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	msg := &waE2E.Message{
+		LocationMessage: &waE2E.LocationMessage{
+			DegreesLatitude:  proto.Float64(req.Latitude),
+			DegreesLongitude: proto.Float64(req.Longitude),
+			Name:             proto.String(req.Name),
+			Address:          proto.String(req.Address),
+		},
+	}
+
+	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
+func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID        int    `json:"user_id"`
+		URL           string `json:"url"`
+		DirectPath    string `json:"direct_path"`
+		MediaKey      []byte `json:"media_key"`
+		FileEncSHA256 []byte `json:"file_enc_sha256"`
+		FileSHA256    []byte `json:"file_sha256"`
+		FileLength    uint64 `json:"file_length"`
+		MimeType      string `json:"mime_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	// Build a minimal ImageMessage to use for download
+	imgMsg := &waE2E.ImageMessage{
+		URL:           proto.String(req.URL),
+		DirectPath:    proto.String(req.DirectPath),
+		MediaKey:      req.MediaKey,
+		FileEncSHA256: req.FileEncSHA256,
+		FileSHA256:    req.FileSHA256,
+		FileLength:    proto.Uint64(req.FileLength),
+		Mimetype:      proto.String(req.MimeType),
+	}
+
+	// Download the media
+	data, err := session.Client.Download(context.Background(), imgMsg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to download: "+err.Error())
+		return
+	}
+
+	// Return as base64
+	jsonResponse(w, map[string]interface{}{
+		"data":      base64.StdEncoding.EncodeToString(data),
+		"mime_type": req.MimeType,
+		"size":      len(data),
+	})
+}
+
 func main() {
 	dataDir := os.Getenv("DATA_DIR")
 	if dataDir == "" {
@@ -806,6 +1133,9 @@ func main() {
 	http.HandleFunc("/messages/send", sendMessageHandler)
 	http.HandleFunc("/messages/typing", setTypingHandler)
 	http.HandleFunc("/messages/react", sendReactionHandler)
+	http.HandleFunc("/messages/image", sendImageHandler)
+	http.HandleFunc("/messages/location", sendLocationHandler)
+	http.HandleFunc("/media/download", downloadMediaHandler)
 	http.HandleFunc("/events", eventsHandler)
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
