@@ -13,6 +13,7 @@ If you're running [Moltbot](https://github.com/clawdbot/clawdbot) (formerly Claw
 - **Real-time events** - SSE streaming for instant message delivery
 - **Multi-user support** - One instance handles multiple WhatsApp accounts
 - **Session persistence** - Encrypted backup/restore across restarts
+- **More stable than Baileys** - Built on [whatsmeow](https://github.com/tulir/whatsmeow) (Go), which has better memory management and fewer session logout issues than the popular Baileys library
 
 ## Quick Start
 
@@ -239,6 +240,26 @@ go install github.com/air-verse/air@latest
 - Your session data is stored locally (or encrypted if `WHATSAPP_SESSION_KEY` is set)
 - Never expose this bridge to the public internet without authentication
 - Consider running behind a reverse proxy with auth
+
+## Current Limitations
+
+- **No group chat support yet** - You can list groups and send messages to group JIDs, but group-specific features (mentions, replies, admin actions) are not implemented
+- **Text messages only** - No media (images, audio, video, documents) support yet
+- **No message history** - Only receives messages while connected
+
+## Roadmap
+
+We'd love your help! Here's what's planned:
+
+- [ ] **Group chat support** - Mentions, replies, group metadata
+- [ ] **Media messages** - Send and receive images, audio, video, documents
+- [ ] **Message replies** - Quote and reply to specific messages
+- [ ] **Read receipts** - Mark messages as read
+- [ ] **Contact sync** - Better contact name resolution
+- [ ] **Webhooks** - Push events to a URL instead of SSE
+- [ ] **Authentication middleware** - Built-in API key auth
+
+Want to contribute? Check out [CONTRIBUTING.md](CONTRIBUTING.md) and pick an item from the list above. PRs welcome!
 
 ## Credits
 
