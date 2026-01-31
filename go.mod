@@ -1,4 +1,4 @@
-module whatsmeow-cli
+module github.com/jo-inc/whatsapp-bridge
 
 go 1.25.0
 
