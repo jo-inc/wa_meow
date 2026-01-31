@@ -263,9 +263,9 @@ Want to contribute? Check out [CONTRIBUTING.md](CONTRIBUTING.md) and pick an ite
 
 ## Credits
 
-Built on [whatsmeow](https://github.com/tulir/whatsmeow), the excellent Go library for WhatsApp Web.
+This project is built on **[whatsmeow](https://github.com/tulir/whatsmeow)** by [@tulir](https://github.com/tulir) - a robust, well-maintained Go library that handles all the WhatsApp Web protocol complexity. Without whatsmeow, this bridge wouldn't exist. If you find this project useful, consider starring [whatsmeow on GitHub](https://github.com/tulir/whatsmeow).
 
-Inspired by the [Moltbot](https://github.com/clawdbot/clawdbot) community.
+Inspired by the [Moltbot](https://github.com/clawdbot/clawdbot) community and the growing ecosystem of self-hosted AI assistants.
 
 ## License
 
