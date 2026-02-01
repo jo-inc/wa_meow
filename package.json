@@ -1,12 +1,13 @@
 {
   "name": "@askjo/wa_meow",
-  "version": "1.0.2",
+  "version": "1.0.7",
   "description": "WhatsApp bridge powered by whatsmeow 🐱 · OpenClaw plugin",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
   "files": [
     "dist",
+    "bin",
     "openclaw.plugin.json"
   ],
   "exports": {
@@ -36,11 +37,11 @@
   "author": "Jo Inc",
   "openclaw": {
     "extensions": [
-      "src/index.ts"
+      "dist/index.js"
     ],
     "channel": {
       "id": "wa_meow",
-      "label": "WhatsApp (whatsmeow)",
+      "label": "askjo/wa_meow whatsapp bridge",
       "description": "WhatsApp channel powered by whatsmeow Go library"
     },
     "install": {
@@ -52,8 +53,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build",
-    "postinstall": "npm run build"
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "typescript": "^5.7.0"

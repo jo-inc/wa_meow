@@ -6,6 +6,10 @@
  */
 
 import { WhatsAppClient } from "./client.js";
+import { spawn, ChildProcess } from "child_process";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
 // OpenClaw plugin types (minimal subset for channel registration)
 interface PluginAPI {
@@ -184,6 +188,94 @@ let log: Logger;
 let inboundHandler: ((msg: InboundMessage) => Promise<void>) | undefined;
 const eventSources = new Map<string, EventSource>();
 const pollingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+let serverProcess: ChildProcess | null = null;
+let pluginDir: string;
+
+/**
+ * Get the path to the Go server binary for the current platform
+ */
+function getServerBinaryPath(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+  
+  let binaryName: string;
+  if (platform === "darwin" && arch === "arm64") {
+    binaryName = "wa_meow-darwin-arm64";
+  } else if (platform === "darwin" && arch === "x64") {
+    binaryName = "wa_meow-darwin-x64";
+  } else if (platform === "linux" && arch === "x64") {
+    binaryName = "wa_meow-linux-x64";
+  } else {
+    return null;
+  }
+  
+  const binaryPath = join(pluginDir, "bin", binaryName);
+  return existsSync(binaryPath) ? binaryPath : null;
+}
+
+/**
+ * Start the Go server process
+ */
+function startServer(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (serverProcess) {
+      resolve();
+      return;
+    }
+    
+    const binaryPath = getServerBinaryPath();
+    if (!binaryPath) {
+      reject(new Error(`No server binary for ${process.platform}-${process.arch}`));
+      return;
+    }
+    
+    log.info(`Starting Go server from ${binaryPath}`);
+    
+    const dataDir = join(pluginDir, "data");
+    
+    serverProcess = spawn(binaryPath, [], {
+      env: {
+        ...process.env,
+        PORT: String(port),
+        DATA_DIR: dataDir,
+        WHATSAPP_SESSION_KEY: process.env.WHATSAPP_SESSION_KEY || "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    
+    serverProcess.stdout?.on("data", (data) => {
+      log.debug(`[server] ${data.toString().trim()}`);
+    });
+    
+    serverProcess.stderr?.on("data", (data) => {
+      log.debug(`[server] ${data.toString().trim()}`);
+    });
+    
+    serverProcess.on("error", (err) => {
+      log.error(`Server process error: ${err}`);
+      serverProcess = null;
+    });
+    
+    serverProcess.on("exit", (code) => {
+      log.info(`Server process exited with code ${code}`);
+      serverProcess = null;
+    });
+    
+    // Give the server a moment to start
+    setTimeout(() => resolve(), 1000);
+  });
+}
+
+/**
+ * Stop the Go server process
+ */
+function stopServer(): void {
+  if (serverProcess) {
+    log.info("Stopping Go server");
+    serverProcess.kill("SIGTERM");
+    serverProcess = null;
+  }
+}
 
 /**
  * Get the userId for an accountId from config
@@ -200,10 +292,10 @@ function createChannelPlugin(): ChannelPlugin {
     id: "wa_meow",
 
     meta: {
-      label: "WhatsApp (whatsmeow)",
-      selectionLabel: "Jo WhatsApp",
+      label: "askjo/wa_meow whatsapp bridge",
+      selectionLabel: "askjo/wa_meow",
       blurb: "WhatsApp channel powered by whatsmeow Go library",
-      detailLabel: "WhatsApp via whatsmeow",
+      detailLabel: "askjo/wa_meow whatsapp bridge",
       systemImage: "message.fill",
     },
 
@@ -291,6 +383,11 @@ function createChannelPlugin(): ChannelPlugin {
 
         log.info(`Starting gateway for account ${accountId} (userId: ${userId})`);
 
+        // Start the Go server if not running
+        const serverUrl = config.serverUrl || "http://localhost:8090";
+        const port = parseInt(new URL(serverUrl).port || "8090", 10);
+        await startServer(port);
+
         // Create session on the Go server
         const result = await client.createSession(userId);
         log.info(`Session created: ${result.status}`);
@@ -358,6 +455,11 @@ function createChannelPlugin(): ChannelPlugin {
 
         // Delete session on Go server
         await client.deleteSession(userId);
+
+        // Stop the server if no more active accounts
+        if (eventSources.size === 0) {
+          stopServer();
+        }
       },
     },
 
@@ -509,16 +611,34 @@ async function* listenToQRStream(es: EventSource): AsyncGenerator<SetupStep> {
 export function register(api: PluginAPI): void {
   const extApi = api as ExtendedPluginAPI;
 
-  log = api.runtime.log;
-  config = api.runtime.config.channels?.["wa_meow"] || {};
+  // Determine plugin directory (where binaries are located)
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  pluginDir = dirname(__dirname); // Go up from dist/ to plugin root
+
+  // Create a fallback logger if runtime.log is not available
+  const noopLog: Logger = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  };
+  log = api.runtime?.log || noopLog;
+  config = api.runtime?.config?.channels?.["wa_meow"] || {};
 
   const serverUrl = config.serverUrl || "http://localhost:8090";
   client = new WhatsAppClient(serverUrl);
 
   // Capture inbound message handler if available
-  inboundHandler = extApi.runtime.gateway?.handleInboundMessage;
+  inboundHandler = extApi.runtime?.gateway?.handleInboundMessage;
 
   log.info(`Registering wa_meow channel plugin (server: ${serverUrl})`);
+
+  // Start the Go server immediately on plugin load
+  const port = parseInt(new URL(serverUrl).port || "8090", 10);
+  startServer(port).catch((err) => {
+    log.error(`Failed to start Go server: ${err}`);
+  });
 
   api.registerChannel({
     plugin: createChannelPlugin(),
@@ -528,6 +648,6 @@ export function register(api: PluginAPI): void {
 // Export for OpenClaw plugin loader
 export default {
   id: "wa_meow",
-  name: "Jo WhatsApp (whatsmeow)",
+  name: "askjo/wa_meow whatsapp bridge",
   register,
 };

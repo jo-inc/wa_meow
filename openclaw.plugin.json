@@ -1,6 +1,6 @@
 {
   "id": "wa_meow",
-  "name": "Jo WhatsApp (whatsmeow)",
+  "name": "askjo/wa_meow whatsapp bridge",
   "version": "0.1.0",
   "description": "WhatsApp channel plugin using Go whatsmeow backend",
   "entry": "dist/index.js",
