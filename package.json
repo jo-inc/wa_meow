@@ -1,5 +1,5 @@
 {
-  "name": "wa_meow",
+  "name": "@askjo/wa_meow",
   "version": "0.1.0",
   "description": "WhatsApp bridge using whatsmeow - OpenClaw channel plugin",
   "main": "dist/index.js",
@@ -14,13 +14,13 @@
       "import": "./dist/index.js"
     }
   },
-  "homepage": "https://github.com/askjo/wa_meow#readme",
+  "homepage": "https://github.com/jo-inc/wa_meow#readme",
   "bugs": {
-    "url": "https://github.com/askjo/wa_meow/issues"
+    "url": "https://github.com/jo-inc/wa_meow/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/askjo/wa_meow.git"
+    "url": "https://github.com/jo-inc/wa_meow.git"
   },
   "keywords": [
     "whatsapp",
