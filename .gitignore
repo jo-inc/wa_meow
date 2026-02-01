@@ -31,3 +31,5 @@ tmp/
 
 # Air live-reload
 tmp/
+node_modules/
+dist/
