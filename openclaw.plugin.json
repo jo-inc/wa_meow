@@ -5,13 +5,14 @@
   "description": "WhatsApp channel plugin using Go whatsmeow backend",
   "entry": "dist/index.js",
   "kind": "channel",
+  "channels": ["wa_meow"],
   "requiresSetup": true,
   "gatewayMethods": ["web.login.start", "web.login.wait"],
   "channel": {
     "id": "wa_meow",
-    "label": "WhatsApp (wa_meow)",
-    "selectionLabel": "WhatsApp (wa_meow)",
-    "blurb": "Connect WhatsApp via QR code scan",
+    "label": "wa_meow WhatsApp (self-chat)",
+    "selectionLabel": "wa_meow WhatsApp (self-chat)",
+    "blurb": "Talk to OpenClaw via WhatsApp self-messaging",
     "docsPath": "/channels/wa_meow"
   },
   "configSchema": {

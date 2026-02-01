@@ -1,6 +1,6 @@
 {
   "name": "@askjo/wa_meow",
-  "version": "1.0.12",
+  "version": "1.0.14",
   "description": "WhatsApp bridge powered by whatsmeow 🐱 · OpenClaw plugin",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -41,10 +41,10 @@
     ],
     "channel": {
       "id": "wa_meow",
-      "label": "WhatsApp (wa_meow)",
-      "selectionLabel": "WhatsApp (wa_meow)",
-      "blurb": "Connect WhatsApp via QR code scan",
-      "description": "WhatsApp channel powered by whatsmeow Go library",
+      "label": "wa_meow WhatsApp (self-chat)",
+      "selectionLabel": "wa_meow WhatsApp (self-chat)",
+      "blurb": "Talk to OpenClaw via WhatsApp self-messaging",
+      "description": "WhatsApp self-chat channel powered by whatsmeow Go library",
       "docsPath": "/channels/wa_meow"
     },
     "install": {
@@ -60,10 +60,12 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "qrcode": "^1.5.4",
+    "eventsource": "^4.1.0",
+    "qrcode-terminal": "^0.12.0",
     "typescript": "^5.7.0"
   },
   "devDependencies": {
+    "@types/eventsource": "^3.0.0",
     "@types/node": "^25.1.0",
     "@types/qrcode": "^1.5.6",
     "vitest": "^3.0.0"

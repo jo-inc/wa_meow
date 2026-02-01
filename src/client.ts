@@ -2,7 +2,7 @@
  * HTTP client for communicating with the wa_meow Go server
  */
 
-import QRCode from "qrcode";
+import { EventSource } from "eventsource";
 
 export interface SessionStatus {
   connected: boolean;
@@ -224,7 +224,7 @@ export class WhatsAppClient {
   async startQRLogin(
     userId: number,
     opts: { force?: boolean; timeoutMs?: number } = {}
-  ): Promise<{ qrDataUrl?: string; message: string; alreadyConnected?: boolean }> {
+  ): Promise<{ qrCode?: string; message: string; alreadyConnected?: boolean }> {
     // First check status
     const status = await this.getStatus(userId);
     if (status.logged_in && !opts.force) {
@@ -234,13 +234,33 @@ export class WhatsAppClient {
       };
     }
 
+    // If forcing re-link, delete the existing session first
+    if (opts.force) {
+      try {
+        await this.deleteSession(userId);
+      } catch {
+        // Ignore deletion errors
+      }
+    }
+
     // Create session to trigger QR generation
-    const session = await this.createSession(userId);
-    if (session.status === "connected" && !opts.force) {
-      return {
-        message: `Already connected as ${session.phone || "unknown"}`,
-        alreadyConnected: true,
-      };
+    try {
+      const session = await this.createSession(userId);
+      if (session.status === "connected" && !opts.force) {
+        return {
+          message: `Already connected as ${session.phone || "unknown"}`,
+          alreadyConnected: true,
+        };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("already connected") && !opts.force) {
+        return {
+          message: `Already connected`,
+          alreadyConnected: true,
+        };
+      }
+      throw err;
     }
 
     // Wait for first QR code via SSE
@@ -255,19 +275,11 @@ export class WhatsAppClient {
       es.addEventListener("qr", async (event) => {
         clearTimeout(timer);
         es.close();
-        try {
-          // Render QR code as PNG data URL
-          const qrDataUrl = await QRCode.toDataURL(event.data, {
-            width: 256,
-            margin: 2,
-          });
-          resolve({
-            qrDataUrl,
-            message: "Scan this QR code in WhatsApp → Linked Devices",
-          });
-        } catch {
-          resolve({ message: "Failed to render QR code" });
-        }
+        // Return the raw QR string for terminal rendering
+        resolve({
+          qrCode: event.data,
+          message: "Scan this QR code in WhatsApp → Linked Devices",
+        });
       });
 
       es.addEventListener("success", () => {

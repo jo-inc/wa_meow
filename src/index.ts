@@ -6,6 +6,8 @@
  */
 
 import { WhatsAppClient } from "./client.js";
+import { createWaMeowOnboardingAdapter, type ChannelOnboardingAdapter } from "./onboarding.js";
+import { monitorWaMeowProvider } from "./monitor.js";
 import { spawn, ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
@@ -49,6 +51,7 @@ interface ChannelPlugin {
   config: ChannelConfigAdapter;
   capabilities: ChannelCapabilities;
   gatewayMethods?: string[];
+  onboarding?: ChannelOnboardingAdapter;
   outbound: OutboundAdapter;
   gateway?: GatewayAdapter;
   setup?: SetupAdapter;
@@ -84,12 +87,14 @@ interface ParticipantResult {
 }
 
 interface ChannelMeta {
+  id?: string;
   label: string;
   selectionLabel?: string;
   blurb?: string;
   docsPath?: string;
   detailLabel?: string;
   systemImage?: string;
+  order?: number;
 }
 
 interface ChannelConfigAdapter {
@@ -140,16 +145,73 @@ interface MediaPayload {
 interface GatewayAdapter {
   start(accountId: string): Promise<void>;
   stop(accountId: string): Promise<void>;
+  startAccount?(ctx: ChannelGatewayContext): Promise<void>;
   loginWithQrStart?(opts: {
     accountId?: string;
     force?: boolean;
     timeoutMs?: number;
     verbose?: boolean;
-  }): Promise<{ qrDataUrl?: string; message: string }>;
+  }): Promise<{ qrCode?: string; message: string }>;
   loginWithQrWait?(opts: {
     accountId?: string;
     timeoutMs?: number;
   }): Promise<{ connected: boolean; message: string }>;
+}
+
+interface ChannelGatewayContext {
+  cfg: unknown;
+  accountId: string;
+  account: ResolvedAccount;
+  runtime: PluginRuntime;
+  abortSignal: AbortSignal;
+  log?: ChannelLogSink;
+  getStatus: () => ChannelAccountSnapshot;
+  setStatus: (next: ChannelAccountSnapshot) => void;
+}
+
+interface ChannelLogSink {
+  info(msg: string): void;
+  warn(msg: string): void;
+  error(msg: string): void;
+  debug(msg: string): void;
+}
+
+interface ChannelAccountSnapshot {
+  accountId: string;
+  [key: string]: unknown;
+}
+
+interface PluginRuntime {
+  config: {
+    loadConfig: () => unknown;
+  };
+  channel: {
+    reply: {
+      dispatchReplyFromConfig: (params: unknown) => Promise<{ queuedFinal: boolean; counts: { final: number } }>;
+      createReplyDispatcherWithTyping: (opts: unknown) => {
+        dispatcher: unknown;
+        replyOptions: Record<string, unknown>;
+        markDispatchIdle: () => void;
+      };
+      finalizeInboundContext: (ctx: unknown) => unknown;
+    };
+    routing: {
+      resolveAgentRoute: (params: unknown) => { sessionKey: string; accountId: string };
+    };
+    session: {
+      recordSessionMetaFromInbound: (params: unknown) => Promise<void>;
+    };
+    activity: {
+      record: (params: unknown) => void;
+    };
+    text: {
+      resolveTextChunkLimit: (cfg: unknown) => number;
+    };
+  };
+  logging: {
+    getChildLogger: (opts: { module: string }) => Logger;
+    shouldLogVerbose: () => boolean;
+  };
 }
 
 interface SetupAdapter {
@@ -308,10 +370,12 @@ function createChannelPlugin(): ChannelPlugin {
     id: "wa_meow",
 
     meta: {
-      label: "WhatsApp (wa_meow)",
-      selectionLabel: "WhatsApp (wa_meow)",
-      blurb: "WhatsApp channel powered by whatsmeow Go library",
-      detailLabel: "WhatsApp (wa_meow)",
+      id: "wa_meow",
+      label: "wa_meow WhatsApp (self-chat)",
+      selectionLabel: "wa_meow WhatsApp (self-chat)",
+      blurb: "Talk to OpenClaw via WhatsApp self-messaging",
+      detailLabel: "wa_meow WhatsApp",
+      docsPath: "/channels/wa_meow",
       systemImage: "message.fill",
     },
 
@@ -359,6 +423,8 @@ function createChannelPlugin(): ChannelPlugin {
     },
 
     gatewayMethods: ["web.login.start", "web.login.wait"],
+
+    onboarding: createWaMeowOnboardingAdapter(client),
 
     outbound: {
       deliveryMode: "push",
@@ -495,12 +561,42 @@ function createChannelPlugin(): ChannelPlugin {
         }
       },
 
+      async startAccount(ctx: ChannelGatewayContext): Promise<void> {
+        const userId = getUserId(ctx.accountId);
+        if (!userId) {
+          throw new Error(`Unknown account: ${ctx.accountId}`);
+        }
+
+        ctx.setStatus({
+          accountId: ctx.accountId,
+          userId,
+        });
+
+        const ctxLog = ctx.log || log;
+        ctxLog.info(`[${ctx.accountId}] Starting wa_meow provider (userId: ${userId})`);
+
+        // Start the Go server if not running
+        const serverUrl = config.serverUrl || "http://localhost:8090";
+        const port = parseInt(new URL(serverUrl).port || "8090", 10);
+        await startServer(port);
+
+        // Call the monitor function for inbound message handling
+        // Cast runtime to any to bridge the two PluginRuntime interfaces
+        return monitorWaMeowProvider({
+          runtime: ctx.runtime as any,
+          client,
+          accountId: ctx.accountId,
+          userId,
+          abortSignal: ctx.abortSignal,
+        });
+      },
+
       async loginWithQrStart(opts: {
         accountId?: string;
         force?: boolean;
         timeoutMs?: number;
         verbose?: boolean;
-      }): Promise<{ qrDataUrl?: string; message: string }> {
+      }): Promise<{ qrCode?: string; message: string }> {
         const accountId = opts.accountId || "default";
         const userId = getUserId(accountId);
         if (!userId) {
@@ -520,7 +616,7 @@ function createChannelPlugin(): ChannelPlugin {
         });
 
         return {
-          qrDataUrl: result.qrDataUrl,
+          qrCode: result.qrCode,
           message: result.message,
         };
       },
