@@ -1,13 +1,16 @@
-# Jo WhatsApp OpenClaw Plugin
+# wa_meow
 
-OpenClaw channel plugin for WhatsApp using the whatsmeow Go library.
+WhatsApp bridge powered by [whatsmeow](https://github.com/tulir/whatsmeow) - includes an OpenClaw channel plugin.
+
+[![npm version](https://img.shields.io/npm/v/wa_meow.svg)](https://www.npmjs.com/package/wa_meow)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
 │ OpenClaw Gateway (Node.js)                      │
-│  └── Plugin: @jo/whatsapp                       │
+│  └── Plugin: wa_meow                            │
 │       └── HTTP/SSE client                       │
 └────────────────────┬────────────────────────────┘
                      │ HTTP (send, status)

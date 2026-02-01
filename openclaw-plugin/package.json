@@ -6,9 +6,18 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "homepage": "https://github.com/jo-inc/wa_meow#readme",
+  "bugs": {
+    "url": "https://github.com/jo-inc/wa_meow/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jo-inc/wa_meow.git",
