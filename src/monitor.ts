@@ -208,24 +208,17 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
   };
 
   // Check if a JID represents self-chat
-  const isSelfChat = (chatJid: string, senderJid: string): boolean => {
-    // NEVER process group chats (@g.us)
-    if (chatJid.includes("@g.us")) {
+  // Matches jo_bot logic: is_from_me AND base_jid(chat) == base_jid(sender)
+  const isSelfChat = (chatJid: string, senderJid: string, isFromMe: boolean): boolean => {
+    // Must be from me
+    if (!isFromMe) {
       return false;
     }
     
-    // Self-chat detection for 1:1 chats only:
-    // 1. chat_jid contains your phone number (classic @s.whatsapp.net format)
-    if (selfPhone && chatJid.includes(selfPhone)) {
-      return true;
-    }
-    // 2. For @lid format: sender and chat are the same JID (strip device suffix first)
+    // base_jid comparison (strip device suffix)
     const normalizedChat = stripDeviceSuffix(chatJid);
     const normalizedSender = stripDeviceSuffix(senderJid);
-    if (normalizedChat === normalizedSender) {
-      return true;
-    }
-    return false;
+    return normalizedChat === normalizedSender;
   };
 
   // Create SSE event source
@@ -233,8 +226,8 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
 
   const handleMessage = async (payload: MessageEvent["payload"]) => {
     try {
-      // Only process self-chat messages
-      const selfChat = isSelfChat(payload.chat_jid, payload.sender_jid);
+      // Only process self-chat messages (is_from_me AND chat_jid == sender_jid)
+      const selfChat = isSelfChat(payload.chat_jid, payload.sender_jid, payload.is_from_me);
       if (!selfChat) {
         return;
       }
