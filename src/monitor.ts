@@ -21,7 +21,8 @@ interface PluginRuntime {
       resolveAgentRoute: (params: RouteParams) => RouteResult;
     };
     session: {
-      recordSessionMetaFromInbound: (params: SessionMetaParams) => Promise<void>;
+      resolveStorePath: (storeConfig: unknown, opts: { agentId?: string }) => string;
+      recordSessionMetaFromInbound: (params: SessionMetaParams) => Promise<unknown>;
     };
     activity: {
       record: (params: ActivityParams) => void;
@@ -39,6 +40,9 @@ interface PluginRuntime {
 interface OpenClawConfig {
   channels?: {
     wa_meow?: WaMeowConfig;
+  };
+  session?: {
+    store?: unknown;
   };
 }
 
@@ -117,24 +121,24 @@ interface ReplyPayload {
 }
 
 interface RouteParams {
+  cfg: OpenClawConfig;
   channel: string;
-  accountId: string;
-  chatId: string;
-  senderId?: string;
-  isGroup?: boolean;
+  accountId?: string | null;
+  peer?: { kind: string; id: string } | null;
+  guildId?: string | null;
+  teamId?: string | null;
 }
 
 interface RouteResult {
+  agentId: string;
   sessionKey: string;
   accountId: string;
 }
 
 interface SessionMetaParams {
-  channel: string;
-  accountId: string;
+  storePath: string;
   sessionKey: string;
-  senderId?: string;
-  senderName?: string;
+  ctx: MsgContext;
 }
 
 interface ActivityParams {
@@ -145,28 +149,26 @@ interface ActivityParams {
 
 export interface MonitorWaMeowOpts {
   runtime: PluginRuntime;
-  runtimeEnv?: RuntimeEnv;
+  cfg: OpenClawConfig;
   client: WhatsAppClient;
   accountId: string;
   userId: number;
   abortSignal?: AbortSignal;
+  log?: Logger;
   onMessage?: (msg: MessageEvent["payload"]) => void;
 }
 
 export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<void> {
-  const { runtime, client, accountId, userId, abortSignal } = opts;
+  const { runtime, cfg, client, accountId, userId, abortSignal } = opts;
   
-  const cfg = runtime.config.loadConfig() as OpenClawConfig;
-  const logger = runtime.logging.getChildLogger({ module: "wa_meow-auto-reply" });
-  const logVerbose = (msg: string) => {
-    if (runtime.logging.shouldLogVerbose()) {
-      logger.debug(msg);
-    }
+  const logger: Logger = opts.log ?? {
+    info: (msg) => console.log(`[wa_meow] ${msg}`),
+    warn: (msg) => console.warn(`[wa_meow] ${msg}`),
+    error: (msg) => console.error(`[wa_meow] ${msg}`),
+    debug: (msg) => console.debug(`[wa_meow] ${msg}`),
   };
-
-  const runtimeEnv: RuntimeEnv = opts.runtimeEnv ?? {
-    log: (...args) => logger.info(args.map(String).join(" ")),
-    error: (...args) => logger.error(args.map(String).join(" ")),
+  const logVerbose = (msg: string) => {
+    logger.debug(msg);
   };
 
   // Create/verify session
@@ -182,14 +184,12 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
     return;
   }
 
-  // Self-chat JID pattern
-  const getSelfChatJid = async (): Promise<string | null> => {
+  // Get phone number for self-chat detection
+  const getSelfPhone = async (): Promise<string | null> => {
     try {
       const status = await client.getStatus(userId);
       if (status.phone) {
-        // WhatsApp self-chat is your own number@s.whatsapp.net
-        const normalized = status.phone.replace(/\D/g, "");
-        return `${normalized}@s.whatsapp.net`;
+        return status.phone.replace(/\D/g, "");
       }
     } catch {
       // ignore
@@ -197,10 +197,36 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
     return null;
   };
 
-  const selfChatJid = await getSelfChatJid();
-  if (!selfChatJid) {
-    logger.warn("wa_meow: Could not determine self-chat JID");
+  const selfPhone = await getSelfPhone();
+  if (!selfPhone) {
+    logger.warn("wa_meow: Could not determine self phone number");
   }
+
+  // Strip device suffix from JID (e.g., "12345:25@lid" -> "12345@lid")
+  const stripDeviceSuffix = (jid: string): string => {
+    return jid.replace(/:\d+@/, "@");
+  };
+
+  // Check if a JID represents self-chat
+  const isSelfChat = (chatJid: string, senderJid: string): boolean => {
+    // NEVER process group chats (@g.us)
+    if (chatJid.includes("@g.us")) {
+      return false;
+    }
+    
+    // Self-chat detection for 1:1 chats only:
+    // 1. chat_jid contains your phone number (classic @s.whatsapp.net format)
+    if (selfPhone && chatJid.includes(selfPhone)) {
+      return true;
+    }
+    // 2. For @lid format: sender and chat are the same JID (strip device suffix first)
+    const normalizedChat = stripDeviceSuffix(chatJid);
+    const normalizedSender = stripDeviceSuffix(senderJid);
+    if (normalizedChat === normalizedSender) {
+      return true;
+    }
+    return false;
+  };
 
   // Create SSE event source
   const es = client.createEventSource(userId);
@@ -208,16 +234,14 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
   const handleMessage = async (payload: MessageEvent["payload"]) => {
     try {
       // Only process self-chat messages
-      if (selfChatJid && payload.chat_jid !== selfChatJid) {
-        logVerbose(`wa_meow: Ignoring non-self-chat message from ${payload.chat_jid}`);
+      const selfChat = isSelfChat(payload.chat_jid, payload.sender_jid);
+      if (!selfChat) {
         return;
       }
 
-      // Skip outgoing messages (our own responses)
-      if (payload.is_from_me) {
-        logVerbose(`wa_meow: Ignoring outgoing message`);
-        return;
-      }
+      // In self-chat, is_from_me=true means USER sent the message (process it)
+      // We only skip messages that are NOT from the user (e.g., bot's own responses)
+      // For now, process all self-chat messages since user sends them all
 
       const bodyText = payload.text || payload.caption || "";
       if (!bodyText.trim()) {
@@ -236,20 +260,14 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
 
       // Resolve routing
       const route = runtime.channel.routing.resolveAgentRoute({
+        cfg,
         channel: "wa_meow",
         accountId,
-        chatId: payload.chat_jid,
-        senderId: payload.sender_jid,
-        isGroup: false,
       });
 
-      // Record session meta
-      await runtime.channel.session.recordSessionMetaFromInbound({
-        channel: "wa_meow",
-        accountId,
-        sessionKey: route.sessionKey,
-        senderId: payload.sender_jid,
-        senderName: payload.sender_name,
+      // Resolve store path for session storage
+      const storePath = runtime.channel.session.resolveStorePath(cfg.session?.store, {
+        agentId: route.agentId,
       });
 
       // Build message context
@@ -271,8 +289,14 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
         ChatType: "dm",
       };
 
+      // Record session meta
+      await runtime.channel.session.recordSessionMetaFromInbound({
+        storePath,
+        sessionKey: route.sessionKey,
+        ctx,
+      });
+
       const finalizedCtx = runtime.channel.reply.finalizeInboundContext(ctx);
-      const textLimit = runtime.channel.text.resolveTextChunkLimit(cfg);
 
       // Create reply dispatcher
       const { dispatcher, replyOptions, markDispatchIdle } =

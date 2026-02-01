@@ -16,10 +16,7 @@ import { fileURLToPath } from "url";
 // OpenClaw plugin types (minimal subset for channel registration)
 interface PluginAPI {
   registerChannel(opts: { plugin: ChannelPlugin }): void;
-  runtime: {
-    config: Config;
-    log: Logger;
-  };
+  runtime: PluginRuntime;
 }
 
 interface Logger {
@@ -259,11 +256,17 @@ interface InboundMessage {
 let client: WhatsAppClient;
 let config: JoWhatsAppConfig;
 let log: Logger;
+let pluginRuntime: PluginRuntime | null = null;
 let inboundHandler: ((msg: InboundMessage) => Promise<void>) | undefined;
 const eventSources = new Map<string, EventSource>();
 const pollingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 let serverProcess: ChildProcess | null = null;
 let pluginDir: string;
+
+// Export for monitor to access
+export function getPluginRuntime(): PluginRuntime | null {
+  return pluginRuntime;
+}
 
 /**
  * Get the path to the Go server binary for the current platform
@@ -435,6 +438,22 @@ function createChannelPlugin(): ChannelPlugin {
           throw new Error(`Unknown account: ${ctx.accountId}`);
         }
 
+        // SAFETY: Only allow sending to self-chat
+        // Get the user's phone number and verify the chatId is self-chat
+        const status = await client.getStatus(userId);
+        if (!status.phone) {
+          throw new Error("Cannot verify self-chat: phone number unknown");
+        }
+        const selfPhone = status.phone.replace(/\D/g, "");
+        const chatIdNormalized = ctx.chatId.replace(/:\d+@/, "@"); // Strip device suffix
+        
+        // Check if chatId contains our phone number (self-chat)
+        const isSelfChat = chatIdNormalized.includes(selfPhone);
+        if (!isSelfChat) {
+          log.error(`wa_meow: BLOCKED send to non-self-chat: ${ctx.chatId}`);
+          throw new Error("wa_meow only allows sending to self-chat");
+        }
+
         const result = await client.sendMessage(
           userId,
           ctx.chatId,
@@ -452,6 +471,19 @@ function createChannelPlugin(): ChannelPlugin {
         const userId = getUserId(ctx.accountId);
         if (!userId) {
           throw new Error(`Unknown account: ${ctx.accountId}`);
+        }
+
+        // SAFETY: Only allow sending to self-chat
+        const status = await client.getStatus(userId);
+        if (!status.phone) {
+          throw new Error("Cannot verify self-chat: phone number unknown");
+        }
+        const selfPhone = status.phone.replace(/\D/g, "");
+        const chatIdNormalized = ctx.chatId.replace(/:\d+@/, "@");
+        const isSelfChat = chatIdNormalized.includes(selfPhone);
+        if (!isSelfChat) {
+          log.error(`wa_meow: BLOCKED media send to non-self-chat: ${ctx.chatId}`);
+          throw new Error("wa_meow only allows sending to self-chat");
         }
 
         if (media.type === "image") {
@@ -581,13 +613,18 @@ function createChannelPlugin(): ChannelPlugin {
         await startServer(port);
 
         // Call the monitor function for inbound message handling
-        // Cast runtime to any to bridge the two PluginRuntime interfaces
+        // Use the stored pluginRuntime from registration, not ctx.runtime
+        if (!pluginRuntime) {
+          throw new Error("PluginRuntime not initialized");
+        }
         return monitorWaMeowProvider({
-          runtime: ctx.runtime as any,
+          runtime: pluginRuntime as any,
+          cfg: ctx.cfg as any,
           client,
           accountId: ctx.accountId,
           userId,
           abortSignal: ctx.abortSignal,
+          log: ctx.log,
         });
       },
 
@@ -794,6 +831,9 @@ export function register(api: PluginAPI): void {
   const __dirname = dirname(__filename);
   pluginDir = dirname(__dirname); // Go up from dist/ to plugin root
 
+  // Store the full PluginRuntime for monitor to use
+  pluginRuntime = api.runtime;
+
   // Create a fallback logger if runtime.log is not available
   const noopLog: Logger = {
     info: () => {},
@@ -801,8 +841,9 @@ export function register(api: PluginAPI): void {
     error: () => {},
     debug: () => {},
   };
-  log = api.runtime?.log || noopLog;
-  config = api.runtime?.config?.channels?.["wa_meow"] || {};
+  log = api.runtime?.logging?.getChildLogger?.({ module: "wa_meow" }) || noopLog;
+  const cfg = api.runtime?.config?.loadConfig?.() as Config | undefined;
+  config = cfg?.channels?.["wa_meow"] || {};
 
   const serverUrl = config.serverUrl || "http://localhost:8090";
   client = new WhatsAppClient(serverUrl);

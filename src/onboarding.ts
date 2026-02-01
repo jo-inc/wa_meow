@@ -3,6 +3,7 @@
  */
 
 import type { WhatsAppClient } from "./client.js";
+// @ts-ignore - no types available
 import qrcode from "qrcode-terminal";
 
 // Types from openclaw/plugin-sdk
