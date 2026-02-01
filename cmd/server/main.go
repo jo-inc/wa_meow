@@ -38,7 +38,7 @@ type SessionManager struct {
 
 type UserSession struct {
 	UserID    int
-	Client    *whatsmeow.Client
+	Client    WhatsAppClient
 	Container *sqlstore.Container
 	DBPath    string
 	LastUsed  time.Time
@@ -276,7 +276,8 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	}
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
-	client := whatsmeow.NewClient(deviceStore, clientLog)
+	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
+	client := newRealClientWrapper(rawClient)
 
 	session := &UserSession{
 		UserID:    userID,
@@ -289,7 +290,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 		EventChan: make(chan MessageEvent, 100),
 	}
 
-	client.AddEventHandler(func(evt interface{}) {
+	rawClient.AddEventHandler(func(evt interface{}) {
 		session.handleEvent(evt)
 	})
 
@@ -495,7 +496,7 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if session.Client.Store.ID == nil {
+	if session.Client.GetStore().GetID() == nil {
 		qrChan, _ := session.Client.GetQRChannel(context.Background())
 		err := session.Client.Connect()
 		if err != nil {
@@ -538,7 +539,7 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{
 		"status":  "connected",
 		"user_id": req.UserID,
-		"phone":   session.Client.Store.ID.User,
+		"phone":   session.Client.GetStore().GetID().User,
 	})
 }
 
@@ -572,7 +573,7 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 		case code := <-session.QRChannel:
 			fmt.Fprintf(w, "event: qr\ndata: %s\n\n", code)
 			flusher.Flush()
-			log.Printf("📱 QR code generated for user %s (length: %d)", userID, len(code))
+			log.Printf("📱 QR code generated for user %d (length: %d)", userID, len(code))
 
 		case <-session.LoginDone:
 			fmt.Fprintf(w, "event: success\ndata: logged_in\n\n")
@@ -612,8 +613,8 @@ func getStatusHandler(w http.ResponseWriter, r *http.Request) {
 		"logged_in": session.Client.IsLoggedIn(),
 	}
 
-	if session.Client.Store.ID != nil {
-		resp["phone"] = session.Client.Store.ID.User
+	if session.Client.GetStore().GetID() != nil {
+		resp["phone"] = session.Client.GetStore().GetID().User
 	}
 
 	jsonResponse(w, resp)
@@ -669,7 +670,7 @@ func getChatsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	contacts, err := session.Client.Store.Contacts.GetAllContacts(ctx)
+	contacts, err := session.Client.GetStore().GetContacts().GetAllContacts(ctx)
 	if err == nil {
 		for jid, contact := range contacts {
 			name := contact.PushName
@@ -1049,6 +1050,132 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type GroupInfoPayload struct {
+	JID          string              `json:"jid"`
+	Name         string              `json:"name"`
+	Topic        string              `json:"topic"`
+	Created      int64               `json:"created"`
+	CreatorJID   string              `json:"creator_jid"`
+	Participants []ParticipantInfo   `json:"participants"`
+	IsAnnounce   bool                `json:"is_announce"`
+	IsLocked     bool                `json:"is_locked"`
+}
+
+type ParticipantInfo struct {
+	JID     string `json:"jid"`
+	IsAdmin bool   `json:"is_admin"`
+	IsSuperAdmin bool `json:"is_super_admin"`
+}
+
+func getGroupInfoHandler(w http.ResponseWriter, r *http.Request) {
+	userID := 0
+	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
+	if userID == 0 {
+		errorResponse(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	groupJID := r.URL.Query().Get("group_jid")
+	if groupJID == "" {
+		errorResponse(w, http.StatusBadRequest, "group_jid required")
+		return
+	}
+
+	session := manager.GetSession(userID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	info, err := session.Client.GetGroupInfo(context.Background(), jid)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
+		return
+	}
+
+	participants := make([]ParticipantInfo, 0, len(info.Participants))
+	for _, p := range info.Participants {
+		participants = append(participants, ParticipantInfo{
+			JID:          p.JID.String(),
+			IsAdmin:      p.IsAdmin,
+			IsSuperAdmin: p.IsSuperAdmin,
+		})
+	}
+
+	payload := GroupInfoPayload{
+		JID:          info.JID.String(),
+		Name:         info.Name,
+		Topic:        info.Topic,
+		Created:      info.GroupCreated.Unix(),
+		CreatorJID:   info.OwnerJID.String(),
+		Participants: participants,
+		IsAnnounce:   info.IsAnnounce,
+		IsLocked:     info.IsLocked,
+	}
+
+	jsonResponse(w, payload)
+}
+
+func listGroupParticipantsHandler(w http.ResponseWriter, r *http.Request) {
+	userID := 0
+	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
+	if userID == 0 {
+		errorResponse(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	groupJID := r.URL.Query().Get("group_jid")
+	if groupJID == "" {
+		errorResponse(w, http.StatusBadRequest, "group_jid required")
+		return
+	}
+
+	session := manager.GetSession(userID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	info, err := session.Client.GetGroupInfo(context.Background(), jid)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
+		return
+	}
+
+	participants := make([]ParticipantInfo, 0, len(info.Participants))
+	for _, p := range info.Participants {
+		participants = append(participants, ParticipantInfo{
+			JID:          p.JID.String(),
+			IsAdmin:      p.IsAdmin,
+			IsSuperAdmin: p.IsSuperAdmin,
+		})
+	}
+
+	jsonResponse(w, participants)
+}
+
 func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1130,6 +1257,8 @@ func main() {
 	http.HandleFunc("/sessions/delete", deleteSessionHandler)
 	http.HandleFunc("/sessions/save", saveSessionHandler)
 	http.HandleFunc("/chats", getChatsHandler)
+	http.HandleFunc("/groups/info", getGroupInfoHandler)
+	http.HandleFunc("/groups/participants", listGroupParticipantsHandler)
 	http.HandleFunc("/messages/send", sendMessageHandler)
 	http.HandleFunc("/messages/typing", setTypingHandler)
 	http.HandleFunc("/messages/react", sendReactionHandler)

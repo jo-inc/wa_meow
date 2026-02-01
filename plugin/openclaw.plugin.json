@@ -1,0 +1,44 @@
+{
+  "id": "jo-whatsapp",
+  "name": "Jo WhatsApp (whatsmeow)",
+  "version": "0.1.0",
+  "description": "WhatsApp channel plugin using Go whatsmeow backend",
+  "entry": "src/index.ts",
+  "kind": "channel",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "description": "URL of the jo-whatsapp Go server",
+        "default": "http://localhost:8090"
+      },
+      "accounts": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "userId": {
+              "type": "integer",
+              "description": "User ID for this WhatsApp account"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": ["userId"]
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "serverUrl": {
+      "label": "Server URL",
+      "placeholder": "http://localhost:8090"
+    },
+    "accounts": {
+      "label": "WhatsApp Accounts"
+    }
+  }
+}

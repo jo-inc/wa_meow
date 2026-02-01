@@ -1,0 +1,30 @@
+{
+  "name": "@jo/whatsapp",
+  "version": "0.1.0",
+  "description": "OpenClaw WhatsApp channel plugin using whatsmeow",
+  "main": "src/index.ts",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "src/index.ts"
+    ],
+    "channel": {
+      "id": "jo-whatsapp",
+      "label": "WhatsApp (whatsmeow)",
+      "description": "WhatsApp channel powered by whatsmeow Go library"
+    },
+    "install": {
+      "config": "channels.jo-whatsapp"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
