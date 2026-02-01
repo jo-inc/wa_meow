@@ -4,6 +4,32 @@ A lightweight, self-hosted WhatsApp gateway for AI assistants. Built for [OpenCl
 
 > **Production-tested:** This code is extracted from and powers the WhatsApp integration at [askjo.ai](https://askjo.ai).
 
+## Add to OpenClaw
+
+```bash
+openclaw plugins install @askjo/wa_meow
+```
+
+Or directly from GitHub:
+
+```bash
+openclaw plugins install https://github.com/jo-inc/wa_meow
+```
+
+Then configure:
+
+```yaml
+channels:
+  wa_meow:
+    serverUrl: http://localhost:8090
+    accounts:
+      main:
+        userId: 1
+        enabled: true
+```
+
+---
+
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.
 
 ## Why This Exists
@@ -124,34 +150,6 @@ Events are delivered as SSE:
 event: message
 data: {"type":"message","payload":{"id":"ABC123","chat_jid":"1234567890@s.whatsapp.net","sender_jid":"9876543210@s.whatsapp.net","sender_name":"John","text":"Hey there!","timestamp":1706745600,"is_from_me":false}}
 ```
-
-## Integrating with OpenClaw
-
-Install the plugin:
-
-```bash
-openclaw plugins install @askjo/wa_meow
-```
-
-Or directly from GitHub:
-
-```bash
-openclaw plugins install https://github.com/jo-inc/wa_meow
-```
-
-Then configure in your OpenClaw config:
-
-```yaml
-channels:
-  wa_meow:
-    serverUrl: http://localhost:8090
-    accounts:
-      main:
-        userId: 1
-        enabled: true
-```
-
-The bridge handles all the WhatsApp protocol complexity. Your AI just sends/receives JSON.
 
 ## Configuration
 
