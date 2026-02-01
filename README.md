@@ -24,14 +24,14 @@ docker run -d \
   --name wa_meow \
   -p 8090:8090 \
   -v wa_meow-data:/data/whatsapp \
-  ghcr.io/jo-inc/wa_meow:latest
+  ghcr.io/askjo/wa_meow:latest
 ```
 
 ### Option 2: From Source
 
 ```bash
 # Clone the repo
-git clone https://github.com/jo-inc/wa_meow.git
+git clone https://github.com/askjo/wa_meow.git
 cd wa_meow
 
 # Run (requires Go 1.21+)
@@ -123,17 +123,24 @@ event: message
 data: {"type":"message","payload":{"id":"ABC123","chat_jid":"1234567890@s.whatsapp.net","sender_jid":"9876543210@s.whatsapp.net","sender_name":"John","text":"Hey there!","timestamp":1706745600,"is_from_me":false}}
 ```
 
-## Integrating with Moltbot
+## OpenClaw Plugin
 
-If you're using Moltbot/Clawdbot, point your WhatsApp channel configuration to this bridge:
+Install the plugin directly from GitHub:
+
+```bash
+openclaw plugins install https://github.com/askjo/wa_meow
+```
+
+Or configure manually in your OpenClaw config:
 
 ```yaml
-# In your Moltbot config
 channels:
-  whatsapp:
-    type: wa_meow
-    url: http://localhost:8090
-    user_id: 1
+  wa_meow:
+    serverUrl: http://localhost:8090
+    accounts:
+      main:
+        userId: 1
+        enabled: true
 ```
 
 The bridge handles all the WhatsApp protocol complexity. Your AI just sends/receives JSON.
@@ -174,7 +181,7 @@ fly deploy
 version: '3.8'
 services:
   wa_meow:
-    image: ghcr.io/jo-inc/wa_meow:latest
+    image: ghcr.io/askjo/wa_meow:latest
     ports:
       - "8090:8090"
     volumes:
