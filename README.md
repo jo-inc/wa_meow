@@ -2,6 +2,8 @@
 
 A lightweight, self-hosted WhatsApp gateway for AI assistants. Built for [OpenClaw](https://openclaw.ai) and similar personal AI agent projects.
 
+> **Production-tested:** This code is extracted from and powers the WhatsApp integration at [askjo.ai](https://askjo.ai).
+
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.
 
 ## Why This Exists
