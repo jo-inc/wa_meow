@@ -2,6 +2,8 @@
  * HTTP client for communicating with the wa_meow Go server
  */
 
+import QRCode from "qrcode";
+
 export interface SessionStatus {
   connected: boolean;
   logged_in: boolean;
@@ -213,5 +215,101 @@ export class WhatsAppClient {
   createQREventSource(userId: number): EventSource {
     const url = `${this.serverUrl}/sessions/qr?user_id=${userId}`;
     return new EventSource(url);
+  }
+
+  /**
+   * Start QR login flow and return the first QR code as a data URL.
+   * Creates a session if needed, then waits for the first QR code.
+   */
+  async startQRLogin(
+    userId: number,
+    opts: { force?: boolean; timeoutMs?: number } = {}
+  ): Promise<{ qrDataUrl?: string; message: string; alreadyConnected?: boolean }> {
+    // First check status
+    const status = await this.getStatus(userId);
+    if (status.logged_in && !opts.force) {
+      return {
+        message: `Already connected as ${status.phone || "unknown"}`,
+        alreadyConnected: true,
+      };
+    }
+
+    // Create session to trigger QR generation
+    const session = await this.createSession(userId);
+    if (session.status === "connected" && !opts.force) {
+      return {
+        message: `Already connected as ${session.phone || "unknown"}`,
+        alreadyConnected: true,
+      };
+    }
+
+    // Wait for first QR code via SSE
+    return new Promise((resolve) => {
+      const timeout = opts.timeoutMs || 30000;
+      const es = this.createQREventSource(userId);
+      const timer = setTimeout(() => {
+        es.close();
+        resolve({ message: "Timeout waiting for QR code" });
+      }, timeout);
+
+      es.addEventListener("qr", async (event) => {
+        clearTimeout(timer);
+        es.close();
+        try {
+          // Render QR code as PNG data URL
+          const qrDataUrl = await QRCode.toDataURL(event.data, {
+            width: 256,
+            margin: 2,
+          });
+          resolve({
+            qrDataUrl,
+            message: "Scan this QR code in WhatsApp → Linked Devices",
+          });
+        } catch {
+          resolve({ message: "Failed to render QR code" });
+        }
+      });
+
+      es.addEventListener("success", () => {
+        clearTimeout(timer);
+        es.close();
+        resolve({ message: "Already logged in", alreadyConnected: true });
+      });
+
+      es.onerror = () => {
+        clearTimeout(timer);
+        es.close();
+        resolve({ message: "Connection error" });
+      };
+    });
+  }
+
+  /**
+   * Wait for QR login to complete.
+   * Polls status until connected or timeout.
+   */
+  async waitForQRLogin(
+    userId: number,
+    opts: { timeoutMs?: number } = {}
+  ): Promise<{ connected: boolean; message: string }> {
+    const timeout = opts.timeoutMs || 120000;
+    const start = Date.now();
+    const pollInterval = 1000;
+
+    while (Date.now() - start < timeout) {
+      const status = await this.getStatus(userId);
+      if (status.logged_in) {
+        return {
+          connected: true,
+          message: `WhatsApp linked as ${status.phone || "unknown"}`,
+        };
+      }
+      await new Promise((r) => setTimeout(r, pollInterval));
+    }
+
+    return {
+      connected: false,
+      message: "Timeout waiting for QR scan",
+    };
   }
 }

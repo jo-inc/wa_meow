@@ -48,6 +48,7 @@ interface ChannelPlugin {
   meta: ChannelMeta;
   config: ChannelConfigAdapter;
   capabilities: ChannelCapabilities;
+  gatewayMethods?: string[];
   outbound: OutboundAdapter;
   gateway?: GatewayAdapter;
   setup?: SetupAdapter;
@@ -94,6 +95,7 @@ interface ChannelMeta {
 interface ChannelConfigAdapter {
   listAccountIds(): string[];
   resolveAccount(accountId: string): ResolvedAccount | undefined;
+  defaultAccountId?(): string;
 }
 
 interface ResolvedAccount {
@@ -138,6 +140,16 @@ interface MediaPayload {
 interface GatewayAdapter {
   start(accountId: string): Promise<void>;
   stop(accountId: string): Promise<void>;
+  loginWithQrStart?(opts: {
+    accountId?: string;
+    force?: boolean;
+    timeoutMs?: number;
+    verbose?: boolean;
+  }): Promise<{ qrDataUrl?: string; message: string }>;
+  loginWithQrWait?(opts: {
+    accountId?: string;
+    timeoutMs?: number;
+  }): Promise<{ connected: boolean; message: string }>;
 }
 
 interface SetupAdapter {
@@ -292,30 +304,45 @@ function createChannelPlugin(): ChannelPlugin {
     id: "wa_meow",
 
     meta: {
-      label: "askjo/wa_meow whatsapp bridge",
-      selectionLabel: "askjo/wa_meow",
+      label: "WhatsApp (wa_meow)",
+      selectionLabel: "WhatsApp (wa_meow)",
       blurb: "WhatsApp channel powered by whatsmeow Go library",
-      detailLabel: "askjo/wa_meow whatsapp bridge",
+      detailLabel: "WhatsApp (wa_meow)",
       systemImage: "message.fill",
     },
 
     config: {
       listAccountIds(): string[] {
-        if (!config.accounts) return [];
-        return Object.keys(config.accounts).filter(
+        if (!config.accounts) return ["default"];
+        const ids = Object.keys(config.accounts).filter(
           (id) => config.accounts?.[id]?.enabled !== false
         );
+        return ids.length > 0 ? ids : ["default"];
       },
 
       resolveAccount(accountId: string): ResolvedAccount | undefined {
         const acct = config.accounts?.[accountId];
-        if (!acct) return undefined;
+        if (!acct) {
+          // Return a default account if none configured
+          if (accountId === "default") {
+            return {
+              accountId: "default",
+              label: "WhatsApp (wa_meow)",
+              enabled: true,
+            };
+          }
+          return undefined;
+        }
 
         return {
           accountId,
           label: `WhatsApp (User ${acct.userId})`,
           enabled: acct.enabled !== false,
         };
+      },
+
+      defaultAccountId(): string {
+        return "default";
       },
     },
 
@@ -326,6 +353,8 @@ function createChannelPlugin(): ChannelPlugin {
       supportsReactions: true,
       supportsTypingIndicator: true,
     },
+
+    gatewayMethods: ["web.login.start", "web.login.wait"],
 
     outbound: {
       deliveryMode: "push",
@@ -460,6 +489,55 @@ function createChannelPlugin(): ChannelPlugin {
         if (eventSources.size === 0) {
           stopServer();
         }
+      },
+
+      async loginWithQrStart(opts: {
+        accountId?: string;
+        force?: boolean;
+        timeoutMs?: number;
+        verbose?: boolean;
+      }): Promise<{ qrDataUrl?: string; message: string }> {
+        const accountId = opts.accountId || "default";
+        const userId = getUserId(accountId);
+        if (!userId) {
+          return { message: `Unknown account: ${accountId}` };
+        }
+
+        log.info(`Starting QR login for account ${accountId} (userId: ${userId})`);
+
+        // Start the Go server if not running
+        const serverUrl = config.serverUrl || "http://localhost:8090";
+        const port = parseInt(new URL(serverUrl).port || "8090", 10);
+        await startServer(port);
+
+        const result = await client.startQRLogin(userId, {
+          force: opts.force,
+          timeoutMs: opts.timeoutMs,
+        });
+
+        return {
+          qrDataUrl: result.qrDataUrl,
+          message: result.message,
+        };
+      },
+
+      async loginWithQrWait(opts: {
+        accountId?: string;
+        timeoutMs?: number;
+      }): Promise<{ connected: boolean; message: string }> {
+        const accountId = opts.accountId || "default";
+        const userId = getUserId(accountId);
+        if (!userId) {
+          return { connected: false, message: `Unknown account: ${accountId}` };
+        }
+
+        log.info(`Waiting for QR login for account ${accountId}`);
+
+        const result = await client.waitForQRLogin(userId, {
+          timeoutMs: opts.timeoutMs,
+        });
+
+        return result;
       },
     },
 
@@ -648,6 +726,6 @@ export function register(api: PluginAPI): void {
 // Export for OpenClaw plugin loader
 export default {
   id: "wa_meow",
-  name: "askjo/wa_meow whatsapp bridge",
+  name: "WhatsApp (wa_meow)",
   register,
 };

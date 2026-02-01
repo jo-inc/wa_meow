@@ -1,10 +1,11 @@
 {
   "id": "wa_meow",
-  "name": "askjo/wa_meow whatsapp bridge",
+  "name": "WhatsApp (wa_meow)",
   "version": "0.1.0",
   "description": "WhatsApp channel plugin using Go whatsmeow backend",
   "entry": "dist/index.js",
   "kind": "channel",
+  "requiresSetup": true,
   "configSchema": {
     "type": "object",
     "properties": {
