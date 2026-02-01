@@ -3,7 +3,7 @@
   "name": "Jo WhatsApp (whatsmeow)",
   "version": "0.1.0",
   "description": "WhatsApp channel plugin using Go whatsmeow backend",
-  "entry": "src/index.ts",
+  "entry": "dist/index.js",
   "kind": "channel",
   "configSchema": {
     "type": "object",
