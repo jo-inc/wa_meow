@@ -290,10 +290,14 @@ function stopServer(): void {
 }
 
 /**
- * Get the userId for an accountId from config
+ * Get the userId for an accountId from config.
+ * Returns 1 for the "default" account if not explicitly configured.
  */
 function getUserId(accountId: string): number | undefined {
-  return config.accounts?.[accountId]?.userId;
+  const userId = config.accounts?.[accountId]?.userId;
+  if (userId !== undefined) return userId;
+  if (accountId === "default") return 1;
+  return undefined;
 }
 
 /**

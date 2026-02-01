@@ -1,6 +1,6 @@
 {
   "name": "@askjo/wa_meow",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "WhatsApp bridge powered by whatsmeow 🐱 · OpenClaw plugin",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -42,10 +42,14 @@
     "channel": {
       "id": "wa_meow",
       "label": "WhatsApp (wa_meow)",
-      "description": "WhatsApp channel powered by whatsmeow Go library"
+      "selectionLabel": "WhatsApp (wa_meow)",
+      "blurb": "Connect WhatsApp via QR code scan",
+      "description": "WhatsApp channel powered by whatsmeow Go library",
+      "docsPath": "/channels/wa_meow"
     },
     "install": {
-      "config": "channels.wa_meow"
+      "config": "channels.wa_meow",
+      "postInstall": "Plugin installed. Run 'openclaw configure' to set up WhatsApp."
     }
   },
   "scripts": {
