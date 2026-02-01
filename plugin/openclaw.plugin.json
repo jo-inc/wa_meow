@@ -1,5 +1,5 @@
 {
-  "id": "jo-whatsapp",
+  "id": "wa_meow",
   "name": "Jo WhatsApp (whatsmeow)",
   "version": "0.1.0",
   "description": "WhatsApp channel plugin using Go whatsmeow backend",
@@ -10,7 +10,7 @@
     "properties": {
       "serverUrl": {
         "type": "string",
-        "description": "URL of the jo-whatsapp Go server",
+        "description": "URL of the wa_meow Go server",
         "default": "http://localhost:8090"
       },
       "accounts": {

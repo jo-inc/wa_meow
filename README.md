@@ -21,18 +21,18 @@ If you're running [Moltbot](https://github.com/clawdbot/clawdbot) (formerly Claw
 
 ```bash
 docker run -d \
-  --name whatsapp-bridge \
+  --name wa_meow \
   -p 8090:8090 \
-  -v whatsapp-data:/data/whatsapp \
-  ghcr.io/jo-inc/whatsapp-bridge:latest
+  -v wa_meow-data:/data/whatsapp \
+  ghcr.io/jo-inc/wa_meow:latest
 ```
 
 ### Option 2: From Source
 
 ```bash
 # Clone the repo
-git clone https://github.com/jo-inc/whatsapp-bridge.git
-cd whatsapp-bridge
+git clone https://github.com/jo-inc/wa_meow.git
+cd wa_meow
 
 # Run (requires Go 1.21+)
 ./run-server.sh
@@ -131,7 +131,7 @@ If you're using Moltbot/Clawdbot, point your WhatsApp channel configuration to t
 # In your Moltbot config
 channels:
   whatsapp:
-    type: whatsapp-bridge
+    type: wa_meow
     url: http://localhost:8090
     user_id: 1
 ```
@@ -163,7 +163,7 @@ export WHATSAPP_SESSION_KEY="your-generated-key"
 ### Fly.io
 
 ```bash
-fly apps create my-whatsapp-bridge
+fly apps create my-wa_meow
 fly secrets set WHATSAPP_SESSION_KEY="$(openssl rand -base64 32)"
 fly deploy
 ```
@@ -173,18 +173,18 @@ fly deploy
 ```yaml
 version: '3.8'
 services:
-  whatsapp-bridge:
-    image: ghcr.io/jo-inc/whatsapp-bridge:latest
+  wa_meow:
+    image: ghcr.io/jo-inc/wa_meow:latest
     ports:
       - "8090:8090"
     volumes:
-      - whatsapp-data:/data/whatsapp
+      - wa_meow-data:/data/whatsapp
     environment:
       - WHATSAPP_SESSION_KEY=your-secret-key
     restart: unless-stopped
 
 volumes:
-  whatsapp-data:
+  wa_meow-data:
 ```
 
 ## Architecture

@@ -1,4 +1,4 @@
-module github.com/jo-inc/whatsapp-bridge
+module github.com/jo-inc/wa_meow
 
 go 1.25.0
 

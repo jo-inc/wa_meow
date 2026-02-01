@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This project aims to be a simple, reli
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR-USERNAME/whatsapp-bridge.git`
+2. Clone your fork: `git clone https://github.com/YOUR-USERNAME/wa_meow.git`
 3. Create a branch: `git checkout -b my-feature`
 4. Make your changes
 5. Test locally: `./run-server.sh`

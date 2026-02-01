@@ -1,5 +1,5 @@
 /**
- * OpenClaw channel plugin for WhatsApp via jo-whatsapp (whatsmeow)
+ * OpenClaw channel plugin for WhatsApp via wa_meow (whatsmeow)
  *
  * This plugin connects to a Go-based WhatsApp server that uses
  * the whatsmeow library for WhatsApp Web protocol.
@@ -25,7 +25,7 @@ interface Logger {
 
 interface Config {
   channels?: {
-    "jo-whatsapp"?: JoWhatsAppConfig;
+    "wa_meow"?: JoWhatsAppConfig;
   };
 }
 
@@ -197,7 +197,7 @@ function getUserId(accountId: string): number | undefined {
  */
 function createChannelPlugin(): ChannelPlugin {
   return {
-    id: "jo-whatsapp",
+    id: "wa_meow",
 
     meta: {
       label: "WhatsApp (whatsmeow)",
@@ -310,7 +310,7 @@ function createChannelPlugin(): ChannelPlugin {
                 if (payload.is_from_me) return;
 
                 inboundHandler({
-                  channel: "jo-whatsapp",
+                  channel: "wa_meow",
                   accountId,
                   chatId: payload.chat_jid,
                   senderId: payload.sender_jid,
@@ -510,7 +510,7 @@ export function register(api: PluginAPI): void {
   const extApi = api as ExtendedPluginAPI;
 
   log = api.runtime.log;
-  config = api.runtime.config.channels?.["jo-whatsapp"] || {};
+  config = api.runtime.config.channels?.["wa_meow"] || {};
 
   const serverUrl = config.serverUrl || "http://localhost:8090";
   client = new WhatsAppClient(serverUrl);
@@ -518,7 +518,7 @@ export function register(api: PluginAPI): void {
   // Capture inbound message handler if available
   inboundHandler = extApi.runtime.gateway?.handleInboundMessage;
 
-  log.info(`Registering jo-whatsapp channel plugin (server: ${serverUrl})`);
+  log.info(`Registering wa_meow channel plugin (server: ${serverUrl})`);
 
   api.registerChannel({
     plugin: createChannelPlugin(),
@@ -527,7 +527,7 @@ export function register(api: PluginAPI): void {
 
 // Export for OpenClaw plugin loader
 export default {
-  id: "jo-whatsapp",
+  id: "wa_meow",
   name: "Jo WhatsApp (whatsmeow)",
   register,
 };

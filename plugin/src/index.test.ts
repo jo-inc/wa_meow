@@ -26,7 +26,7 @@ vi.mock("./client.js", () => {
 import { register } from "./index.js";
 import { WhatsAppClient } from "./client.js";
 
-describe("jo-whatsapp plugin", () => {
+describe("wa_meow plugin", () => {
   let registeredPlugin: {
     id: string;
     meta: {
@@ -121,7 +121,7 @@ describe("jo-whatsapp plugin", () => {
       runtime: {
         config: {
           channels: {
-            "jo-whatsapp": {
+            "wa_meow": {
               serverUrl: "http://test-server:8090",
               accounts: {
                 main: { userId: 123, enabled: true },
@@ -174,7 +174,7 @@ describe("jo-whatsapp plugin", () => {
 
       expect(api.registerChannel).toHaveBeenCalledWith({
         plugin: expect.objectContaining({
-          id: "jo-whatsapp",
+          id: "wa_meow",
         }),
       });
     });
@@ -190,7 +190,7 @@ describe("jo-whatsapp plugin", () => {
 
     describe("meta", () => {
       it("should have correct plugin metadata", () => {
-        expect(registeredPlugin.id).toBe("jo-whatsapp");
+        expect(registeredPlugin.id).toBe("wa_meow");
         expect(registeredPlugin.meta.label).toBe("WhatsApp (whatsmeow)");
         expect(registeredPlugin.meta.selectionLabel).toBe("Jo WhatsApp");
         expect(registeredPlugin.meta.systemImage).toBe("message.fill");
@@ -212,7 +212,7 @@ describe("jo-whatsapp plugin", () => {
             registeredPlugin = opts.plugin;
           }),
           runtime: {
-            config: { channels: { "jo-whatsapp": {} } },
+            config: { channels: { "wa_meow": {} } },
             log: mockLogger,
           },
         };
@@ -516,7 +516,7 @@ describe("jo-whatsapp plugin", () => {
     it("should export plugin metadata", async () => {
       const defaultExport = await import("./index.js").then((m) => m.default);
 
-      expect(defaultExport.id).toBe("jo-whatsapp");
+      expect(defaultExport.id).toBe("wa_meow");
       expect(defaultExport.name).toBe("Jo WhatsApp (whatsmeow)");
       expect(typeof defaultExport.register).toBe("function");
     });

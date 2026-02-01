@@ -1,5 +1,5 @@
 /**
- * HTTP client for communicating with the jo-whatsapp Go server
+ * HTTP client for communicating with the wa_meow Go server
  */
 
 export interface SessionStatus {

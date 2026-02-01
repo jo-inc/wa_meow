@@ -9,12 +9,12 @@
       "src/index.ts"
     ],
     "channel": {
-      "id": "jo-whatsapp",
+      "id": "wa_meow",
       "label": "WhatsApp (whatsmeow)",
       "description": "WhatsApp channel powered by whatsmeow Go library"
     },
     "install": {
-      "config": "channels.jo-whatsapp"
+      "config": "channels.wa_meow"
     }
   },
   "scripts": {

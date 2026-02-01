@@ -14,7 +14,7 @@ OpenClaw channel plugin for WhatsApp using the whatsmeow Go library.
                      │ SSE (inbound messages)
                      ▼
 ┌─────────────────────────────────────────────────┐
-│ jo-whatsapp Server (Go + whatsmeow)             │
+│ wa_meow Server (Go + whatsmeow)             │
 │  ├── POST /sessions         (create session)   │
 │  ├── GET  /sessions/qr      (SSE QR stream)    │
 │  ├── GET  /sessions/status  (connection status)│
@@ -32,7 +32,7 @@ OpenClaw channel plugin for WhatsApp using the whatsmeow Go library.
 ### 1. Start the Go Server
 
 ```bash
-cd jo-whatsapp
+cd wa_meow
 go run ./cmd/server
 
 # Or build and run
@@ -51,8 +51,8 @@ Environment variables:
 Copy the plugin to your OpenClaw extensions directory:
 
 ```bash
-cp -r jo-whatsapp/plugin ~/.openclaw/extensions/jo-whatsapp
-cd ~/.openclaw/extensions/jo-whatsapp
+cp -r wa_meow/plugin ~/.openclaw/extensions/wa_meow
+cd ~/.openclaw/extensions/wa_meow
 npm install
 ```
 
@@ -62,7 +62,7 @@ Or add to `plugins.load.paths` in your OpenClaw config:
 plugins:
   load:
     paths:
-      - /path/to/jo-whatsapp/plugin
+      - /path/to/wa_meow/plugin
 ```
 
 ### 3. Configure the Channel
@@ -71,7 +71,7 @@ Add to your OpenClaw config:
 
 ```yaml
 channels:
-  jo-whatsapp:
+  wa_meow:
     serverUrl: http://localhost:8090
     accounts:
       main:
@@ -84,7 +84,7 @@ channels:
 Use the OpenClaw CLI or UI to start the pairing wizard:
 
 ```bash
-openclaw channels pair jo-whatsapp --account main
+openclaw channels pair wa_meow --account main
 ```
 
 Scan the QR code with WhatsApp on your phone.
