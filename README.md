@@ -1,12 +1,12 @@
 # WhatsApp Bridge
 
-A lightweight, self-hosted WhatsApp gateway for AI assistants. Built for [Moltbot](https://github.com/clawdbot/clawdbot) and similar personal AI agent projects.
+A lightweight, self-hosted WhatsApp gateway for AI assistants. Built for [OpenClaw](https://openclaw.ai) and similar personal AI agent projects.
 
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.
 
 ## Why This Exists
 
-If you're running [Moltbot](https://github.com/clawdbot/clawdbot) (formerly Clawdbot), [OpenClaw](https://docs.openclaw.ai), or building your own AI assistant, you need a way to connect to WhatsApp. This bridge:
+If you're running [OpenClaw](https://openclaw.ai) or building your own AI assistant, you need a way to connect to WhatsApp. This bridge:
 
 - **Runs on your hardware** - Your messages stay with you
 - **Simple REST API** - No complex protocols to learn
@@ -24,14 +24,14 @@ docker run -d \
   --name wa_meow \
   -p 8090:8090 \
   -v wa_meow-data:/data/whatsapp \
-  ghcr.io/askjo/wa_meow:latest
+  ghcr.io/jo-inc/wa_meow:latest
 ```
 
 ### Option 2: From Source
 
 ```bash
 # Clone the repo
-git clone https://github.com/askjo/wa_meow.git
+git clone https://github.com/jo-inc/wa_meow.git
 cd wa_meow
 
 # Run (requires Go 1.21+)
@@ -123,15 +123,21 @@ event: message
 data: {"type":"message","payload":{"id":"ABC123","chat_jid":"1234567890@s.whatsapp.net","sender_jid":"9876543210@s.whatsapp.net","sender_name":"John","text":"Hey there!","timestamp":1706745600,"is_from_me":false}}
 ```
 
-## OpenClaw Plugin
+## Integrating with OpenClaw
 
-Install the plugin directly from GitHub:
+Install the plugin:
 
 ```bash
-openclaw plugins install https://github.com/askjo/wa_meow
+openclaw plugins install @askjo/wa_meow
 ```
 
-Or configure manually in your OpenClaw config:
+Or directly from GitHub:
+
+```bash
+openclaw plugins install https://github.com/jo-inc/wa_meow
+```
+
+Then configure in your OpenClaw config:
 
 ```yaml
 channels:
@@ -181,7 +187,7 @@ fly deploy
 version: '3.8'
 services:
   wa_meow:
-    image: ghcr.io/askjo/wa_meow:latest
+    image: ghcr.io/jo-inc/wa_meow:latest
     ports:
       - "8090:8090"
     volumes:
@@ -272,7 +278,7 @@ Want to contribute? Check out [CONTRIBUTING.md](CONTRIBUTING.md) and pick an ite
 
 This project is built on **[whatsmeow](https://github.com/tulir/whatsmeow)** by [@tulir](https://github.com/tulir) - a robust, well-maintained Go library that handles all the WhatsApp Web protocol complexity. Without whatsmeow, this bridge wouldn't exist. If you find this project useful, consider starring [whatsmeow on GitHub](https://github.com/tulir/whatsmeow).
 
-Inspired by the [Moltbot](https://github.com/clawdbot/clawdbot) community and the growing ecosystem of self-hosted AI assistants.
+Inspired by the [OpenClaw](https://openclaw.ai) community and the growing ecosystem of self-hosted AI assistants.
 
 ## License
 
