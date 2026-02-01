@@ -262,20 +262,6 @@ go install github.com/air-verse/air@latest
 - **Text messages only** - No media (images, audio, video, documents) support yet
 - **No message history** - Only receives messages while connected
 
-## Roadmap
-
-We'd love your help! Here's what's planned:
-
-- [ ] **Group chat support** - Mentions, replies, group metadata
-- [ ] **Media messages** - Send and receive images, audio, video, documents
-- [ ] **Message replies** - Quote and reply to specific messages
-- [ ] **Read receipts** - Mark messages as read
-- [ ] **Contact sync** - Better contact name resolution
-- [ ] **Webhooks** - Push events to a URL instead of SSE
-- [ ] **Authentication middleware** - Built-in API key auth
-
-Want to contribute? Check out [CONTRIBUTING.md](CONTRIBUTING.md) and pick an item from the list above. PRs welcome!
-
 ## Credits
 
 This project is built on **[whatsmeow](https://github.com/tulir/whatsmeow)** by [@tulir](https://github.com/tulir) - a robust, well-maintained Go library that handles all the WhatsApp Web protocol complexity. Without whatsmeow, this bridge wouldn't exist. If you find this project useful, consider starring [whatsmeow on GitHub](https://github.com/tulir/whatsmeow).
