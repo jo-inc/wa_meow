@@ -1,7 +1,7 @@
 {
   "name": "@askjo/wa_meow",
   "version": "0.1.0",
-  "description": "WhatsApp bridge powered by whatsmeow 🐱",
+  "description": "WhatsApp bridge powered by whatsmeow 🐱 · OpenClaw plugin",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
