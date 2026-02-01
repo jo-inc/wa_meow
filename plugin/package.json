@@ -1,9 +1,28 @@
 {
-  "name": "@jo/whatsapp",
+  "name": "wa_meow",
   "version": "0.1.0",
-  "description": "OpenClaw WhatsApp channel plugin using whatsmeow",
-  "main": "src/index.ts",
+  "description": "WhatsApp bridge using whatsmeow - OpenClaw channel plugin",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "type": "module",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jo-inc/wa_meow.git",
+    "directory": "plugin"
+  },
+  "keywords": [
+    "whatsapp",
+    "whatsmeow",
+    "openclaw",
+    "channel",
+    "messaging"
+  ],
+  "license": "MIT",
+  "author": "Jo Inc",
   "openclaw": {
     "extensions": [
       "src/index.ts"
@@ -18,9 +37,11 @@
     }
   },
   "scripts": {
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^25.1.0",
