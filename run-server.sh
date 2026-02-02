@@ -23,10 +23,8 @@ echo "  curl -X POST localhost:$PORT/sessions -d '{\"user_id\":195}'"
 echo "  curl localhost:$PORT/sessions/status?user_id=195"
 echo ""
 
-# Use air for live-reload if available, otherwise go run
-if command -v air &> /dev/null; then
-    air
-else
-    echo "💡 Install air for live-reload: go install github.com/air-verse/air@latest"
-    go run ./cmd/server
-fi
+# Build and run (logs visible)
+echo "🔨 Building..."
+go build -o ./tmp/server ./cmd/server || exit 1
+echo "✅ Running server..."
+./tmp/server 2>&1

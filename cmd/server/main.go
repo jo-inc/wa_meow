@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -530,7 +531,7 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	if !session.Client.IsConnected() {
 		err := session.Client.Connect()
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "already connected") {
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
