@@ -5,7 +5,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/whatsapp-server ./cmd/server/main.go"
+  cmd = "go build -o ./tmp/whatsapp-server ./cmd/server"
   bin = "./tmp/whatsapp-server"
   delay = 1000
   exclude_dir = ["tmp", "data", "swift-example"]

@@ -12,6 +12,7 @@ export JO_BOT_URL="${JO_BOT_URL:-http://localhost:10000}"
 export WHATSAPP_SESSION_KEY="${WHATSAPP_SESSION_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=}"
 
 mkdir -p "$DATA_DIR"
+mkdir -p "./tmp"
 
 echo "🚀 WhatsApp server: http://localhost:$PORT"
 echo "📁 Data: $DATA_DIR"
@@ -27,5 +28,5 @@ if command -v air &> /dev/null; then
     air
 else
     echo "💡 Install air for live-reload: go install github.com/air-verse/air@latest"
-    go run ./cmd/server/main.go
+    go run ./cmd/server
 fi
