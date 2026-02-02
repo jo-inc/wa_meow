@@ -221,8 +221,72 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
     return normalizedChat === normalizedSender;
   };
 
-  // Create SSE event source
-  const es = client.createEventSource(userId);
+  // Reconnection state
+  let currentEs: EventSource | null = null;
+  let reconnectAttempts = 0;
+  const MAX_RECONNECT_DELAY = 30000; // 30 seconds max
+  const BASE_RECONNECT_DELAY = 1000; // 1 second base
+
+  const getReconnectDelay = (): number => {
+    // Exponential backoff with jitter: 1s, 2s, 4s, 8s, ... up to 30s
+    const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+    const jitter = Math.random() * 500; // Add up to 500ms jitter
+    return delay + jitter;
+  };
+
+  const createAndConnectEventSource = (): EventSource => {
+    const es = client.createEventSource(userId);
+    
+    es.addEventListener("message", (event) => {
+      // Reset reconnect attempts on successful message
+      reconnectAttempts = 0;
+      
+      try {
+        const data = JSON.parse(event.data) as MessageEvent;
+        if (data.type === "message" && data.payload) {
+          opts.onMessage?.(data.payload);
+          handleMessage(data.payload).catch((err) => {
+            logger.error(`wa_meow: Message handler error: ${err}`);
+          });
+        }
+      } catch (err) {
+        logger.error(`wa_meow: Failed to parse SSE event: ${err}`);
+      }
+    });
+
+    es.onopen = () => {
+      reconnectAttempts = 0;
+      logger.info(`wa_meow: SSE connection established for user ${userId}`);
+    };
+
+    es.onerror = () => {
+      logger.error(`wa_meow: SSE connection error`);
+      
+      // Close the current connection
+      es.close();
+      
+      // Don't reconnect if aborted
+      if (abortSignal?.aborted) {
+        return;
+      }
+      
+      // Schedule reconnection
+      const delay = getReconnectDelay();
+      reconnectAttempts++;
+      logger.info(`wa_meow: Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts})`);
+      
+      setTimeout(() => {
+        if (!abortSignal?.aborted) {
+          currentEs = createAndConnectEventSource();
+        }
+      }, delay);
+    };
+
+    return es;
+  };
+
+  // Create initial SSE event source
+  currentEs = createAndConnectEventSource();
 
   const handleMessage = async (payload: MessageEvent["payload"]) => {
     try {
@@ -334,28 +398,9 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
     }
   };
 
-  // Listen for messages
-  es.addEventListener("message", (event) => {
-    try {
-      const data = JSON.parse(event.data) as MessageEvent;
-      if (data.type === "message" && data.payload) {
-        opts.onMessage?.(data.payload);
-        handleMessage(data.payload).catch((err) => {
-          logger.error(`wa_meow: Message handler error: ${err}`);
-        });
-      }
-    } catch (err) {
-      logger.error(`wa_meow: Failed to parse SSE event: ${err}`);
-    }
-  });
-
-  es.onerror = () => {
-    logger.error(`wa_meow: SSE connection error`);
-  };
-
   // Handle abort
   const cleanup = () => {
-    es.close();
+    currentEs?.close();
     logger.info(`wa_meow: Monitor stopped for user ${userId}`);
   };
 
