@@ -1263,6 +1263,81 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID   int    `json:"user_id"`
+		ChatJID  string `json:"chat_jid"`
+		AudioB64 string `json:"audio_b64"` // Base64 encoded audio
+		MimeType string `json:"mime_type"` // e.g. "audio/ogg; codecs=opus"
+		PTT      bool   `json:"ptt"`       // Push-to-talk (voice note mode)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	// Decode base64 audio
+	audioData, err := base64.StdEncoding.DecodeString(req.AudioB64)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid base64 audio")
+		return
+	}
+
+	// Upload to WhatsApp servers
+	uploaded, err := session.Client.Upload(context.Background(), audioData, whatsmeow.MediaAudio)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to upload audio: "+err.Error())
+		return
+	}
+
+	// Build and send audio message
+	msg := &waE2E.Message{
+		AudioMessage: &waE2E.AudioMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(req.MimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(audioData))),
+			PTT:           proto.Bool(req.PTT),
+		},
+	}
+
+	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
 func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1611,6 +1686,7 @@ func main() {
 	http.HandleFunc("/messages/typing", setTypingHandler)
 	http.HandleFunc("/messages/react", sendReactionHandler)
 	http.HandleFunc("/messages/image", sendImageHandler)
+	http.HandleFunc("/messages/audio", sendAudioHandler)
 	http.HandleFunc("/messages/location", sendLocationHandler)
 	http.HandleFunc("/media/download", downloadMediaHandler)
 	http.HandleFunc("/events", eventsHandler)
