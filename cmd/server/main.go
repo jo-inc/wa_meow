@@ -466,18 +466,63 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				payload.FileLength = *audio.FileLength
 			}
 			
-			// Download audio with MediaRetry fallback for PTT
-			// Flow: try download -> if fails, send MediaRetryReceipt -> handle events.MediaRetry for new DirectPath
+			// Download audio with retry loop for desktop-originated messages
+			// Desktop (web) messages may arrive before media upload is complete (mediaStage != RESOLVED)
+			// We retry with delays to wait for CDN, then fall back to MediaRetry for phone re-upload
 			go func(msgID string, audioMsg *waE2E.AudioMessage, isPTT bool, msgInfo *types.MessageInfo) {
 				// Log download parameters for debugging
-				log.Printf("[media/cache] Audio download params for %s (ptt=%v): directPath=%s, mediaKeyLen=%d, encSHA256Len=%d, sha256Len=%d, fileLen=%d",
+				log.Printf("[media/cache] Audio download params for %s (ptt=%v): directPath=%s, mediaKeyLen=%d, encSHA256Len=%d, sha256Len=%d, fileLen=%d, url=%s",
 					msgID, isPTT, audioMsg.GetDirectPath(), len(audioMsg.GetMediaKey()),
-					len(audioMsg.GetFileEncSHA256()), len(audioMsg.GetFileSHA256()), audioMsg.GetFileLength())
+					len(audioMsg.GetFileEncSHA256()), len(audioMsg.GetFileSHA256()), audioMsg.GetFileLength(), audioMsg.GetURL())
 
-				// Try standard Download first (like images) - it handles URL vs DirectPath automatically
-				data, err := s.Client.Download(context.Background(), audioMsg)
-				if err != nil {
-					log.Printf("[media/cache] Audio %s: Download failed: %v", msgID, err)
+				// Check if media is "resolved" - has the required fields for download
+				// Analogous to whatsapp-web.js mediaStage === 'RESOLVED'
+				isResolved := func() bool {
+					hasPath := audioMsg.GetDirectPath() != "" || audioMsg.GetURL() != ""
+					hasKey := len(audioMsg.GetMediaKey()) > 0
+					hasHash := len(audioMsg.GetFileEncSHA256()) > 0
+					return hasPath && hasKey && hasHash
+				}
+
+				var data []byte
+				var err error
+
+				// Retry loop: desktop messages may not be uploaded yet when event arrives
+				// Wait up to ~12 seconds total for media to be resolved and available on CDN
+				retryDelays := []time.Duration{0, 2 * time.Second, 3 * time.Second, 4 * time.Second, 3 * time.Second}
+				for attempt, delay := range retryDelays {
+					if delay > 0 {
+						log.Printf("[media/cache] PTT %s: retry %d/%d after %v", msgID, attempt, len(retryDelays)-1, delay)
+						time.Sleep(delay)
+					}
+
+					// Check if media is resolved before attempting download
+					if !isResolved() {
+						log.Printf("[media/cache] Audio %s attempt %d: media not resolved (missing directPath/mediaKey/hash)", msgID, attempt+1)
+						continue
+					}
+
+					data, err = s.Client.Download(context.Background(), audioMsg)
+					if err != nil {
+						log.Printf("[media/cache] Audio %s attempt %d: Download error: %v", msgID, attempt+1, err)
+						continue
+					}
+
+					if len(data) > 0 {
+						log.Printf("[media/cache] Audio %s attempt %d: success, %d bytes", msgID, attempt+1, len(data))
+						break
+					}
+
+					log.Printf("[media/cache] Audio %s attempt %d: 0 bytes (CDN not ready)", msgID, attempt+1)
+
+					// On first 0-byte response, proactively send MediaRetryReceipt
+					// This may trigger desktop/phone to complete/retry the upload
+					if attempt == 0 && isPTT && msgInfo != nil {
+						log.Printf("[media/retry] PTT %s: sending early MediaRetryReceipt to trigger re-upload", msgID)
+						if retryErr := s.Client.SendMediaRetryReceipt(context.Background(), msgInfo, audioMsg.GetMediaKey()); retryErr != nil {
+							log.Printf("[media/retry] Early MediaRetryReceipt failed for %s: %v", msgID, retryErr)
+						}
+					}
 				}
 
 				if len(data) > 0 {
@@ -488,10 +533,10 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					return
 				}
 
-				// Download failed or returned 0 bytes - for PTT, request phone to re-upload
-				// The response will come as events.MediaRetry with a new DirectPath
+				// All retries failed - for PTT, try MediaRetry as last resort (asks phone to re-upload)
+				// This works for phone-originated messages but may not help desktop-originated ones
 				if isPTT && msgInfo != nil {
-					log.Printf("[media/retry] PTT %s: download returned 0 bytes, sending MediaRetryReceipt to phone", msgID)
+					log.Printf("[media/retry] PTT %s: all download attempts failed, sending MediaRetryReceipt to phone", msgID)
 
 					// Store pending retry info for when we receive events.MediaRetry
 					s.PendingRetriesMu.Lock()
@@ -513,7 +558,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 						log.Printf("[media/retry] PTT %s: MediaRetryReceipt sent, waiting for events.MediaRetry response", msgID)
 					}
 				} else {
-					log.Printf("[media/cache] WARNING: Audio %s download failed, 0 bytes (ptt=%v)", msgID, isPTT)
+					log.Printf("[media/cache] WARNING: Audio %s download failed after all retries, 0 bytes (ptt=%v)", msgID, isPTT)
 				}
 			}(v.Info.ID, audio, payload.IsPTT, &v.Info)
 			
