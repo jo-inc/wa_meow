@@ -1270,11 +1270,12 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		UserID   int    `json:"user_id"`
-		ChatJID  string `json:"chat_jid"`
-		AudioB64 string `json:"audio_b64"` // Base64 encoded audio
-		MimeType string `json:"mime_type"` // e.g. "audio/ogg; codecs=opus"
-		PTT      bool   `json:"ptt"`       // Push-to-talk (voice note mode)
+		UserID     int    `json:"user_id"`
+		ChatJID    string `json:"chat_jid"`
+		AudioB64   string `json:"audio_b64"`   // Base64 encoded audio
+		MimeType   string `json:"mime_type"`   // e.g. "audio/ogg; codecs=opus"
+		PTT        bool   `json:"ptt"`         // Push-to-talk (voice note mode)
+		Seconds    uint32 `json:"seconds"`     // Duration in seconds
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
@@ -1313,17 +1314,24 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build and send audio message
+	audioMsg := &waE2E.AudioMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String(req.MimeType),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(audioData))),
+		PTT:           proto.Bool(req.PTT),
+	}
+	
+	// Set duration if provided
+	if req.Seconds > 0 {
+		audioMsg.Seconds = proto.Uint32(req.Seconds)
+	}
+	
 	msg := &waE2E.Message{
-		AudioMessage: &waE2E.AudioMessage{
-			URL:           proto.String(uploaded.URL),
-			DirectPath:    proto.String(uploaded.DirectPath),
-			MediaKey:      uploaded.MediaKey,
-			Mimetype:      proto.String(req.MimeType),
-			FileEncSHA256: uploaded.FileEncSHA256,
-			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(audioData))),
-			PTT:           proto.Bool(req.PTT),
-		},
+		AudioMessage: audioMsg,
 	}
 
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
