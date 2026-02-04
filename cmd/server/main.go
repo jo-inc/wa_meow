@@ -375,6 +375,31 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			hasContent = true
 		}
 
+		// Handle audio/voice messages (ptt = push-to-talk/voice note)
+		if audio := v.Message.AudioMessage; audio != nil {
+			if audio.GetPTT() {
+				payload.MediaType = "ptt"
+			} else {
+				payload.MediaType = "audio"
+			}
+			if audio.Mimetype != nil {
+				payload.MimeType = *audio.Mimetype
+			}
+			if audio.URL != nil {
+				payload.MediaURL = *audio.URL
+			}
+			if audio.DirectPath != nil {
+				payload.DirectPath = *audio.DirectPath
+			}
+			payload.MediaKey = audio.MediaKey
+			payload.FileEncSHA256 = audio.FileEncSHA256
+			payload.FileSHA256 = audio.FileSHA256
+			if audio.FileLength != nil {
+				payload.FileLength = *audio.FileLength
+			}
+			hasContent = true
+		}
+
 		// Handle location messages
 		if loc := v.Message.LocationMessage; loc != nil {
 			payload.MediaType = "location"
