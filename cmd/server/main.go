@@ -1234,19 +1234,32 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build a minimal ImageMessage to use for download
-	imgMsg := &waE2E.ImageMessage{
-		URL:           proto.String(req.URL),
-		DirectPath:    proto.String(req.DirectPath),
-		MediaKey:      req.MediaKey,
-		FileEncSHA256: req.FileEncSHA256,
-		FileSHA256:    req.FileSHA256,
-		FileLength:    proto.Uint64(req.FileLength),
-		Mimetype:      proto.String(req.MimeType),
+	// Build appropriate message type based on mime_type
+	var downloadable whatsmeow.DownloadableMessage
+	if strings.HasPrefix(req.MimeType, "audio/") {
+		downloadable = &waE2E.AudioMessage{
+			URL:           proto.String(req.URL),
+			DirectPath:    proto.String(req.DirectPath),
+			MediaKey:      req.MediaKey,
+			FileEncSHA256: req.FileEncSHA256,
+			FileSHA256:    req.FileSHA256,
+			FileLength:    proto.Uint64(req.FileLength),
+			Mimetype:      proto.String(req.MimeType),
+		}
+	} else {
+		downloadable = &waE2E.ImageMessage{
+			URL:           proto.String(req.URL),
+			DirectPath:    proto.String(req.DirectPath),
+			MediaKey:      req.MediaKey,
+			FileEncSHA256: req.FileEncSHA256,
+			FileSHA256:    req.FileSHA256,
+			FileLength:    proto.Uint64(req.FileLength),
+			Mimetype:      proto.String(req.MimeType),
+		}
 	}
 
 	// Download the media
-	data, err := session.Client.Download(context.Background(), imgMsg)
+	data, err := session.Client.Download(context.Background(), downloadable)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to download: "+err.Error())
 		return
