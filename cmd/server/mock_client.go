@@ -265,3 +265,30 @@ func (m *MockWhatsAppClient) AddEventHandler(handler whatsmeow.EventHandler) uin
 	m.recordCall("AddEventHandler", handler)
 	return 0
 }
+
+func (m *MockWhatsAppClient) DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength int, mediaType whatsmeow.MediaType, mmsType string) ([]byte, error) {
+	m.recordCall("DownloadMediaWithPath", ctx, directPath, encFileHash, fileHash, mediaKey, fileLength, mediaType, mmsType)
+	if m.DownloadError != nil {
+		return nil, m.DownloadError
+	}
+	if m.DownloadData == nil {
+		return []byte("mock-audio-data"), nil
+	}
+	return m.DownloadData, nil
+}
+
+func (m *MockWhatsAppClient) DownloadAndDecrypt(ctx context.Context, url string, mediaKey []byte, appInfo whatsmeow.MediaType, fileLength int, fileEncSHA256, fileSHA256 []byte) ([]byte, error) {
+	m.recordCall("DownloadAndDecrypt", ctx, url, mediaKey, appInfo, fileLength, fileEncSHA256, fileSHA256)
+	if m.DownloadError != nil {
+		return nil, m.DownloadError
+	}
+	if m.DownloadData == nil {
+		return []byte("mock-audio-data"), nil
+	}
+	return m.DownloadData, nil
+}
+
+func (m *MockWhatsAppClient) SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error {
+	m.recordCall("SendMediaRetryReceipt", ctx, message, mediaKey)
+	return nil
+}

@@ -26,13 +26,14 @@ func injectMockSession(m *SessionManager, userID int, client *MockWhatsAppClient
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session := &UserSession{
-		UserID:    userID,
-		Client:    client,
-		DBPath:    "",
-		LastUsed:  time.Now(),
-		QRChannel: make(chan string, 10),
-		LoginDone: make(chan bool, 1),
-		EventChan: make(chan MessageEvent, 100),
+		UserID:     userID,
+		Client:     client,
+		DBPath:     "",
+		LastUsed:   time.Now(),
+		QRChannel:  make(chan string, 10),
+		LoginDone:  make(chan bool, 1),
+		EventChan:  make(chan MessageEvent, 100),
+		MediaCache: make(map[string][]byte),
 	}
 	m.sessions[userID] = session
 	return session
@@ -1431,11 +1432,18 @@ func TestUserSession_handleEvent(t *testing.T) {
 		}
 	}
 
-	t.Run("handles text message with Conversation", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
+	// Helper to create a test session with mock client
+	makeTestSession := func() *UserSession {
+		return &UserSession{
+			UserID:     1,
+			Client:     NewLoggedInMockClient(),
+			EventChan:  make(chan MessageEvent, 10),
+			MediaCache: make(map[string][]byte),
 		}
+	}
+
+	t.Run("handles text message with Conversation", func(t *testing.T) {
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: types.MessageInfo{
@@ -1473,10 +1481,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles ExtendedTextMessage", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info:    makeInfo("msg-002"),
@@ -1497,10 +1502,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles image message", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-003"),
@@ -1531,10 +1533,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles location message", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-004"),
@@ -1564,10 +1563,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles location with only address", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-005"),
@@ -1590,10 +1586,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles live location message", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-006"),
@@ -1619,10 +1612,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles contact message", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-007"),
@@ -1647,10 +1637,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("handles contacts array message", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info: makeInfo("msg-008"),
@@ -1681,10 +1668,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("ignores empty messages", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		evt := &events.Message{
 			Info:    makeInfo("msg-009"),
@@ -1702,10 +1686,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("ignores non-Message events", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 10),
-		}
+		session := makeTestSession()
 
 		// Pass a different event type
 		session.handleEvent("some string event")
@@ -1719,10 +1700,8 @@ func TestUserSession_handleEvent(t *testing.T) {
 	})
 
 	t.Run("drops message when channel full", func(t *testing.T) {
-		session := &UserSession{
-			UserID:    1,
-			EventChan: make(chan MessageEvent, 1), // Very small buffer
-		}
+		session := makeTestSession()
+		session.EventChan = make(chan MessageEvent, 1) // Very small buffer
 
 		// Fill the channel
 		session.EventChan <- MessageEvent{Type: "filler"}

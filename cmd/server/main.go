@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,12 +23,29 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waMmsRetry"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+// baileysTransport wraps http.RoundTripper to mimic Baileys HTTP behavior
+// Baileys only sends Origin header, not Referer - and no User-Agent
+type baileysTransport struct {
+	base http.RoundTripper
+}
+
+func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Remove Referer header (Baileys doesn't send it)
+	req.Header.Del("Referer")
+	// Remove User-Agent (Baileys doesn't send it for media downloads)
+	req.Header.Del("User-Agent")
+	// Log what we're actually sending
+	log.Printf("[media/http] Request: %s, Headers: Origin=%s", req.URL.Host, req.Header.Get("Origin"))
+	return t.base.RoundTrip(req)
+}
 
 type SessionManager struct {
 	sessions   map[int]*UserSession
@@ -37,15 +55,28 @@ type SessionManager struct {
 	encryptKey []byte
 }
 
+// PendingMediaRetry stores info needed to complete a media retry download
+type PendingMediaRetry struct {
+	AudioMsg  *waE2E.AudioMessage
+	MediaKey  []byte
+	MessageID string
+	IsPTT     bool
+}
+
 type UserSession struct {
-	UserID    int
-	Client    WhatsAppClient
-	Container *sqlstore.Container
-	DBPath    string
-	LastUsed  time.Time
-	QRChannel chan string
-	LoginDone chan bool
-	EventChan chan MessageEvent
+	UserID     int
+	Client     WhatsAppClient
+	Container  *sqlstore.Container
+	DBPath     string
+	LastUsed   time.Time
+	QRChannel  chan string
+	LoginDone  chan bool
+	EventChan  chan MessageEvent
+	MediaCache map[string][]byte // Cache downloaded media by message ID
+	MediaMu    sync.RWMutex
+	// Pending media retries: message ID -> pending retry info
+	PendingRetries   map[string]*PendingMediaRetry
+	PendingRetriesMu sync.RWMutex
 }
 
 type MessageEvent struct {
@@ -72,12 +103,13 @@ type MessagePayload struct {
 	// Contact fields (vCard)
 	ContactName  string `json:"contact_name,omitempty"`
 	ContactVCard string `json:"contact_vcard,omitempty"`
-	// Image download info (for downloading media)
+	// Media download info
 	MediaKey      []byte `json:"media_key,omitempty"`
 	DirectPath    string `json:"direct_path,omitempty"`
 	FileEncSHA256 []byte `json:"file_enc_sha256,omitempty"`
 	FileSHA256    []byte `json:"file_sha256,omitempty"`
 	FileLength    uint64 `json:"file_length,omitempty"`
+	IsPTT         bool   `json:"is_ptt,omitempty"` // Push-to-talk (voice note) - critical for download
 }
 
 type ChatPayload struct {
@@ -278,17 +310,38 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
 	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
+	
+	// Configure a custom HTTP client for media downloads that mimics Baileys:
+	// 1. Remove Referer header (Baileys doesn't send it)
+	// 2. Force HTTP/1.1 to avoid potential HTTP/2 fingerprinting issues
+	// 3. TLSNextProto=empty map disables HTTP/2 negotiation
+	baseTransport := &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: false,
+		TLSNextProto:      map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	customTransport := &baileysTransport{
+		base: baseTransport,
+	}
+	rawClient.SetMediaHTTPClient(&http.Client{
+		Transport: customTransport,
+		Timeout:   60 * time.Second,
+	})
+	
 	client := newRealClientWrapper(rawClient)
 
 	session := &UserSession{
-		UserID:    userID,
-		Client:    client,
-		Container: container,
-		DBPath:    dbPath,
-		LastUsed:  time.Now(),
-		QRChannel: make(chan string, 10),
-		LoginDone: make(chan bool, 1),
-		EventChan: make(chan MessageEvent, 100),
+		UserID:         userID,
+		Client:         client,
+		Container:      container,
+		DBPath:         dbPath,
+		LastUsed:       time.Now(),
+		QRChannel:      make(chan string, 10),
+		LoginDone:      make(chan bool, 1),
+		EventChan:      make(chan MessageEvent, 100),
+		MediaCache:     make(map[string][]byte),
+		PendingRetries: make(map[string]*PendingMediaRetry),
 	}
 
 	rawClient.AddEventHandler(func(evt interface{}) {
@@ -372,12 +425,27 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			if img.FileLength != nil {
 				payload.FileLength = *img.FileLength
 			}
+			
+			// Test: download image immediately to compare with PTT download
+			go func(msgID string, imgMsg *waE2E.ImageMessage) {
+				data, err := s.Client.Download(context.Background(), imgMsg)
+				if err != nil {
+					log.Printf("[media/cache] Failed to download image %s: %v", msgID, err)
+					return
+				}
+				s.MediaMu.Lock()
+				s.MediaCache[msgID] = data
+				s.MediaMu.Unlock()
+				log.Printf("[media/cache] Cached image %s: %d bytes", msgID, len(data))
+			}(v.Info.ID, img)
+			
 			hasContent = true
 		}
 
 		// Handle audio/voice messages (ptt = push-to-talk/voice note)
 		if audio := v.Message.AudioMessage; audio != nil {
-			if audio.GetPTT() {
+			payload.IsPTT = audio.GetPTT()
+			if payload.IsPTT {
 				payload.MediaType = "ptt"
 			} else {
 				payload.MediaType = "audio"
@@ -397,6 +465,58 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			if audio.FileLength != nil {
 				payload.FileLength = *audio.FileLength
 			}
+			
+			// Download audio with MediaRetry fallback for PTT
+			// Flow: try download -> if fails, send MediaRetryReceipt -> handle events.MediaRetry for new DirectPath
+			go func(msgID string, audioMsg *waE2E.AudioMessage, isPTT bool, msgInfo *types.MessageInfo) {
+				// Log download parameters for debugging
+				log.Printf("[media/cache] Audio download params for %s (ptt=%v): directPath=%s, mediaKeyLen=%d, encSHA256Len=%d, sha256Len=%d, fileLen=%d",
+					msgID, isPTT, audioMsg.GetDirectPath(), len(audioMsg.GetMediaKey()),
+					len(audioMsg.GetFileEncSHA256()), len(audioMsg.GetFileSHA256()), audioMsg.GetFileLength())
+
+				// Try standard Download first (like images) - it handles URL vs DirectPath automatically
+				data, err := s.Client.Download(context.Background(), audioMsg)
+				if err != nil {
+					log.Printf("[media/cache] Audio %s: Download failed: %v", msgID, err)
+				}
+
+				if len(data) > 0 {
+					s.MediaMu.Lock()
+					s.MediaCache[msgID] = data
+					s.MediaMu.Unlock()
+					log.Printf("[media/cache] Cached audio %s: %d bytes (ptt=%v)", msgID, len(data), isPTT)
+					return
+				}
+
+				// Download failed or returned 0 bytes - for PTT, request phone to re-upload
+				// The response will come as events.MediaRetry with a new DirectPath
+				if isPTT && msgInfo != nil {
+					log.Printf("[media/retry] PTT %s: download returned 0 bytes, sending MediaRetryReceipt to phone", msgID)
+
+					// Store pending retry info for when we receive events.MediaRetry
+					s.PendingRetriesMu.Lock()
+					s.PendingRetries[msgID] = &PendingMediaRetry{
+						AudioMsg:  audioMsg,
+						MediaKey:  audioMsg.GetMediaKey(),
+						MessageID: msgID,
+						IsPTT:     isPTT,
+					}
+					s.PendingRetriesMu.Unlock()
+
+					if retryErr := s.Client.SendMediaRetryReceipt(context.Background(), msgInfo, audioMsg.GetMediaKey()); retryErr != nil {
+						log.Printf("[media/retry] MediaRetryReceipt failed for %s: %v", msgID, retryErr)
+						// Clean up pending retry on failure
+						s.PendingRetriesMu.Lock()
+						delete(s.PendingRetries, msgID)
+						s.PendingRetriesMu.Unlock()
+					} else {
+						log.Printf("[media/retry] PTT %s: MediaRetryReceipt sent, waiting for events.MediaRetry response", msgID)
+					}
+				} else {
+					log.Printf("[media/cache] WARNING: Audio %s download failed, 0 bytes (ptt=%v)", msgID, isPTT)
+				}
+			}(v.Info.ID, audio, payload.IsPTT, &v.Info)
+			
 			hasContent = true
 		}
 
@@ -484,7 +604,86 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				log.Printf("Event channel full for user %d, dropping message", s.UserID)
 			}
 		}
+
+	case *events.MediaRetry:
+		// Handle MediaRetry response from phone after SendMediaRetryReceipt
+		// This contains a new DirectPath for downloading media that was re-uploaded
+		s.handleMediaRetry(v)
 	}
+}
+
+// handleMediaRetry processes the events.MediaRetry response after we sent SendMediaRetryReceipt
+// It decrypts the notification to get the new DirectPath and downloads the media
+func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
+	msgID := string(evt.MessageID)
+	log.Printf("[media/retry] Received MediaRetry event for message %s (chat=%s, fromMe=%v)",
+		msgID, evt.ChatID.String(), evt.FromMe)
+
+	// Look up pending retry
+	s.PendingRetriesMu.RLock()
+	pending, ok := s.PendingRetries[msgID]
+	s.PendingRetriesMu.RUnlock()
+
+	if !ok {
+		log.Printf("[media/retry] No pending retry found for message %s, ignoring", msgID)
+		return
+	}
+
+	// Clean up pending retry (we'll only try once)
+	defer func() {
+		s.PendingRetriesMu.Lock()
+		delete(s.PendingRetries, msgID)
+		s.PendingRetriesMu.Unlock()
+	}()
+
+	// Decrypt the notification to get the new DirectPath
+	retryData, err := whatsmeow.DecryptMediaRetryNotification(evt, pending.MediaKey)
+	if err != nil {
+		log.Printf("[media/retry] Failed to decrypt MediaRetry notification for %s: %v", msgID, err)
+		return
+	}
+
+	// Check result
+	if retryData.GetResult() != waMmsRetry.MediaRetryNotification_SUCCESS {
+		log.Printf("[media/retry] MediaRetry failed for %s: result=%v", msgID, retryData.GetResult())
+		return
+	}
+
+	newDirectPath := retryData.GetDirectPath()
+	if newDirectPath == "" {
+		log.Printf("[media/retry] MediaRetry for %s succeeded but no DirectPath in response", msgID)
+		return
+	}
+
+	log.Printf("[media/retry] Got new DirectPath for %s: %s", msgID, newDirectPath)
+
+	// Download using the new DirectPath
+	data, err := s.Client.DownloadMediaWithPath(
+		context.Background(),
+		newDirectPath,
+		pending.AudioMsg.GetFileEncSHA256(),
+		pending.AudioMsg.GetFileSHA256(),
+		pending.MediaKey,
+		-1,
+		whatsmeow.MediaAudio,
+		"audio",
+	)
+
+	if err != nil {
+		log.Printf("[media/retry] Download with new DirectPath failed for %s: %v", msgID, err)
+		return
+	}
+
+	if len(data) == 0 {
+		log.Printf("[media/retry] Download with new DirectPath returned 0 bytes for %s", msgID)
+		return
+	}
+
+	// Cache the downloaded media
+	s.MediaMu.Lock()
+	s.MediaCache[msgID] = data
+	s.MediaMu.Unlock()
+	log.Printf("[media/retry] SUCCESS: Cached audio %s: %d bytes (ptt=%v) via MediaRetry", msgID, len(data), pending.IsPTT)
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -1210,6 +1409,7 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		UserID        int    `json:"user_id"`
+		MessageID     string `json:"message_id"` // For cache lookup
 		URL           string `json:"url"`
 		DirectPath    string `json:"direct_path"`
 		MediaKey      []byte `json:"media_key"`
@@ -1217,6 +1417,7 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		FileSHA256    []byte `json:"file_sha256"`
 		FileLength    uint64 `json:"file_length"`
 		MimeType      string `json:"mime_type"`
+		IsPTT         bool   `json:"is_ptt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
@@ -1234,36 +1435,99 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build appropriate message type based on mime_type
-	var downloadable whatsmeow.DownloadableMessage
-	if strings.HasPrefix(req.MimeType, "audio/") {
-		downloadable = &waE2E.AudioMessage{
-			URL:           proto.String(req.URL),
-			DirectPath:    proto.String(req.DirectPath),
-			MediaKey:      req.MediaKey,
-			FileEncSHA256: req.FileEncSHA256,
-			FileSHA256:    req.FileSHA256,
-			FileLength:    proto.Uint64(req.FileLength),
-			Mimetype:      proto.String(req.MimeType),
+	// Check cache first (media downloaded immediately on receive)
+	if req.MessageID != "" {
+		session.MediaMu.RLock()
+		cachedData, found := session.MediaCache[req.MessageID]
+		session.MediaMu.RUnlock()
+		if found {
+			log.Printf("[media/download] Cache hit for %s: %d bytes", req.MessageID, len(cachedData))
+			// Remove from cache after serving
+			session.MediaMu.Lock()
+			delete(session.MediaCache, req.MessageID)
+			session.MediaMu.Unlock()
+			jsonResponse(w, map[string]interface{}{
+				"data":      base64.StdEncoding.EncodeToString(cachedData),
+				"mime_type": req.MimeType,
+				"size":      len(cachedData),
+			})
+			return
 		}
-	} else {
-		downloadable = &waE2E.ImageMessage{
-			URL:           proto.String(req.URL),
-			DirectPath:    proto.String(req.DirectPath),
-			MediaKey:      req.MediaKey,
-			FileEncSHA256: req.FileEncSHA256,
-			FileSHA256:    req.FileSHA256,
-			FileLength:    proto.Uint64(req.FileLength),
-			Mimetype:      proto.String(req.MimeType),
-		}
+		log.Printf("[media/download] Cache miss for %s, trying direct download", req.MessageID)
 	}
 
-	// Download the media
-	data, err := session.Client.Download(context.Background(), downloadable)
+	// Fallback: try to reconstruct and download
+	// Use DownloadMediaWithPath which internally refreshes mediaConn for fresh auth tokens
+	log.Printf("[media/download] Downloading %s (ptt=%v) for user %d, fileLen=%d", 
+		req.MimeType, req.IsPTT, req.UserID, req.FileLength)
+	
+	var data []byte
+	var err error
+	
+	// Determine media type and mmsType based on mime
+	// Note: PTT uses mmsType="audio" same as regular audio (Baileys has no 'ptt' in MEDIA_PATH_MAP)
+	var mediaType whatsmeow.MediaType
+	var mmsType string
+	if strings.HasPrefix(req.MimeType, "audio/") {
+		mediaType = whatsmeow.MediaAudio
+		mmsType = "audio" // PTT and regular audio both use "audio"
+	} else if strings.HasPrefix(req.MimeType, "video/") {
+		mediaType = whatsmeow.MediaVideo
+		mmsType = "video"
+	} else if strings.HasPrefix(req.MimeType, "image/") {
+		mediaType = whatsmeow.MediaImage
+		mmsType = "image"
+	} else {
+		mediaType = whatsmeow.MediaDocument
+		mmsType = "document"
+	}
+	
+	// Retry with exponential backoff - CDN returns 26-byte empty stub for stale auth
+	maxRetries := 4
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second}
+	
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := backoffs[attempt-1]
+			log.Printf("[media/download] Retry %d/%d after %v", attempt, maxRetries, backoff)
+			time.Sleep(backoff)
+		}
+		
+		data, err = session.Client.DownloadMediaWithPath(
+			context.Background(),
+			req.DirectPath,
+			req.FileEncSHA256,
+			req.FileSHA256,
+			req.MediaKey,
+			-1,
+			mediaType,
+			mmsType,
+		)
+		
+		log.Printf("[media/download] Attempt %d: dataLen=%d, err=%v", attempt+1, len(data), err)
+		
+		if err != nil {
+			continue
+		}
+		
+		if len(data) > 0 {
+			break
+		}
+		
+		log.Printf("[media/download] Attempt %d: got 0 bytes (stale auth, will retry)", attempt+1)
+	}
+	
 	if err != nil {
+		log.Printf("[media/download] All attempts failed: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to download: "+err.Error())
 		return
 	}
+	if len(data) == 0 {
+		log.Printf("[media/download] All attempts returned 0 bytes")
+		errorResponse(w, http.StatusInternalServerError, "media download returned empty content after retries")
+		return
+	}
+	log.Printf("[media/download] Success: %d bytes", len(data))
 
 	// Return as base64
 	jsonResponse(w, map[string]interface{}{
