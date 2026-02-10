@@ -7,7 +7,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY cmd/server/main.go ./cmd/server/
+COPY cmd/server/main.go cmd/server/interfaces.go ./cmd/server/
 
 RUN CGO_ENABLED=1 GOOS=linux go build -o whatsapp-server ./cmd/server
 
