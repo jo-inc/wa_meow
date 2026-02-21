@@ -48,11 +48,12 @@ func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 type SessionManager struct {
-	sessions   map[int]*UserSession
-	mu         sync.RWMutex
-	dataDir    string
-	joBotURL   string
-	encryptKey []byte
+	sessions           map[int]*UserSession
+	mu                 sync.RWMutex
+	dataDir            string
+	joBotURL           string
+	joBotInternalToken string
+	encryptKey         []byte
 }
 
 // PendingMediaRetry stores info needed to complete a media retry download
@@ -136,10 +137,11 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 	}
 	
 	return &SessionManager{
-		sessions:   make(map[int]*UserSession),
-		dataDir:    dataDir,
-		joBotURL:   joBotURL,
-		encryptKey: encryptKey,
+		sessions:           make(map[int]*UserSession),
+		dataDir:            dataDir,
+		joBotURL:           joBotURL,
+		joBotInternalToken: strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
+		encryptKey:         encryptKey,
 	}
 }
 
@@ -201,7 +203,12 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 	}
 	
 	url := fmt.Sprintf("%s/api/whatsapp/session?user_id=%d", m.joBotURL, userID)
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to fetch session from jo_bot: %v", err)
 		return nil
@@ -266,7 +273,13 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	jsonData, _ := json.Marshal(payload)
 	
 	url := fmt.Sprintf("%s/api/whatsapp/session", m.joBotURL)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonData))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to save session to jo_bot: %v", err)
 		return err
@@ -1346,6 +1359,80 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		UserID   int    `json:"user_id"`
+		ChatJID  string `json:"chat_jid"`
+		DocB64   string `json:"doc_b64"`   // Base64 encoded document
+		MimeType string `json:"mime_type"` // e.g. "application/pdf"
+		Filename string `json:"filename"`  // e.g. "report.pdf"
+		Caption  string `json:"caption"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	session := manager.GetSession(req.UserID)
+	if session == nil {
+		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if !session.Client.IsLoggedIn() {
+		errorResponse(w, http.StatusBadRequest, "not logged in")
+		return
+	}
+
+	jid, err := types.ParseJID(req.ChatJID)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid jid")
+		return
+	}
+
+	docData, err := base64.StdEncoding.DecodeString(req.DocB64)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid base64 document")
+		return
+	}
+
+	uploaded, err := session.Client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to upload document: "+err.Error())
+		return
+	}
+
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			Caption:       proto.String(req.Caption),
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(req.MimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(docData))),
+			FileName:      proto.String(req.Filename),
+		},
+	}
+
+	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
 func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1695,6 +1782,7 @@ func main() {
 	http.HandleFunc("/messages/react", sendReactionHandler)
 	http.HandleFunc("/messages/image", sendImageHandler)
 	http.HandleFunc("/messages/audio", sendAudioHandler)
+	http.HandleFunc("/messages/document", sendDocumentHandler)
 	http.HandleFunc("/messages/location", sendLocationHandler)
 	http.HandleFunc("/media/download", downloadMediaHandler)
 	http.HandleFunc("/events", eventsHandler)
