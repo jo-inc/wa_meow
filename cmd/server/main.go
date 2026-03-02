@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	sentry "github.com/getsentry/sentry-go"
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
@@ -1753,6 +1754,17 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              dsn,
+			TracesSampleRate: 0.1,
+		})
+		if err != nil {
+			log.Printf("Sentry init failed: %s", err)
+		}
+		defer sentry.Flush(2 * time.Second)
+	}
+
 	dataDir := os.Getenv("DATA_DIR")
 	if dataDir == "" {
 		dataDir = "/data/whatsapp"
@@ -1797,6 +1809,8 @@ func main() {
 	}
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		sentry.CaptureException(err)
+		sentry.Flush(2 * time.Second)
 		log.Fatal(err)
 	}
 }
