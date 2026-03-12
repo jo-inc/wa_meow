@@ -16,6 +16,7 @@ type WhatsAppClient interface {
 	IsLoggedIn() bool
 	Connect() error
 	Disconnect()
+	Logout() error
 
 	// QR login
 	GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error)
@@ -79,6 +80,10 @@ func (w *realClientWrapper) Connect() error {
 
 func (w *realClientWrapper) Disconnect() {
 	w.client.Disconnect()
+}
+
+func (w *realClientWrapper) Logout() error {
+	return w.client.Logout(context.Background())
 }
 
 func (w *realClientWrapper) GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {

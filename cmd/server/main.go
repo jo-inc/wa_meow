@@ -380,9 +380,20 @@ func (m *SessionManager) RemoveSession(userID int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if session, ok := m.sessions[userID]; ok {
-		session.Client.Disconnect()
-		// Save session before removing
-		m.saveSessionToJoBot(userID)
+		// Logout invalidates the WA session server-side so re-connect requires fresh QR
+		if session.Client.IsLoggedIn() {
+			if err := session.Client.Logout(); err != nil {
+				log.Printf("⚠️ Logout failed for user %d: %v (continuing with disconnect)", userID, err)
+			}
+		} else {
+			session.Client.Disconnect()
+		}
+		// Delete the local session DB so GetOrCreateSession starts fresh
+		if session.DBPath != "" {
+			if err := os.Remove(session.DBPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("⚠️ Failed to delete session DB for user %d: %v", userID, err)
+			}
+		}
 		delete(m.sessions, userID)
 	}
 }

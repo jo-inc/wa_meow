@@ -190,13 +190,28 @@ func TestSessionManager_RemoveSession(t *testing.T) {
 		m.RemoveSession(12345) // Should not panic
 	})
 
-	t.Run("removes and disconnects session", func(t *testing.T) {
+	t.Run("removes and logs out session when logged in", func(t *testing.T) {
 		mock := NewLoggedInMockClient()
 		injectMockSession(m, 200, mock)
 
 		m.RemoveSession(200)
 
 		if m.GetSession(200) != nil {
+			t.Error("expected session to be removed")
+		}
+		calls := mock.GetCallsByMethod("Logout")
+		if len(calls) == 0 {
+			t.Error("expected Logout to be called")
+		}
+	})
+
+	t.Run("removes and disconnects session when not logged in", func(t *testing.T) {
+		mock := NewConnectedMockClient()
+		injectMockSession(m, 201, mock)
+
+		m.RemoveSession(201)
+
+		if m.GetSession(201) != nil {
 			t.Error("expected session to be removed")
 		}
 		calls := mock.GetCallsByMethod("Disconnect")
@@ -391,10 +406,10 @@ func TestDeleteSessionHandler(t *testing.T) {
 			t.Errorf("expected status 'disconnected', got %q", resp["status"])
 		}
 
-		// Verify Disconnect was called
-		calls := mock.GetCallsByMethod("Disconnect")
+		// Verify Logout was called (since mock was logged in)
+		calls := mock.GetCallsByMethod("Logout")
 		if len(calls) == 0 {
-			t.Error("expected Disconnect to be called")
+			t.Error("expected Logout to be called")
 		}
 	})
 }

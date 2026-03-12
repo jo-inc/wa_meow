@@ -190,6 +190,15 @@ func (m *MockWhatsAppClient) Disconnect() {
 	m.mu.Unlock()
 }
 
+func (m *MockWhatsAppClient) Logout() error {
+	m.recordCall("Logout")
+	m.mu.Lock()
+	m.connected = false
+	m.loggedIn = false
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *MockWhatsAppClient) GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	m.recordCall("GetQRChannel", ctx)
 	if m.QRChannelError != nil {
