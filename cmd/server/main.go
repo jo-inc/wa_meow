@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -121,6 +122,21 @@ type ChatPayload struct {
 	IsGroup bool   `json:"is_group"`
 }
 
+func piiFingerprint(value string) string {
+	if value == "" {
+		return "none"
+	}
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:6])
+}
+
+func piiPresence(value string) string {
+	if value == "" {
+		return "absent"
+	}
+	return fmt.Sprintf("present(hash=%s,len=%d)", piiFingerprint(value), len(value))
+}
+
 var manager *SessionManager
 
 func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager {
@@ -212,7 +228,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to fetch session from jo_bot: %v", err)
+		log.Printf("Failed to fetch session from jo_bot backend: request error")
 		return nil
 	}
 	defer resp.Body.Close()
@@ -248,7 +264,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 		return err
 	}
 
-	log.Printf("✅ Restored session for user %d from jo_bot", userID)
+	log.Printf("✅ Restored session from jo_bot")
 	return nil
 }
 
@@ -283,7 +299,7 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to save session to jo_bot: %v", err)
+		log.Printf("Failed to save session to jo_bot backend: request error")
 		return err
 	}
 	defer resp.Body.Close()
@@ -293,7 +309,7 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 		return fmt.Errorf("save failed: %d", resp.StatusCode)
 	}
 
-	log.Printf("✅ Saved session for user %d to jo_bot", userID)
+	log.Printf("✅ Saved session to jo_bot")
 	return nil
 }
 
@@ -385,7 +401,7 @@ func (m *SessionManager) RemoveSession(userID int) {
 		// Logout invalidates the WA session server-side so re-connect requires fresh QR
 		if session.Client.IsLoggedIn() {
 			if err := session.Client.Logout(); err != nil {
-				log.Printf("⚠️ Logout failed for user %d: %v (continuing with disconnect)", userID, err)
+				log.Printf("⚠️ Logout failed during session removal: %v (continuing with disconnect)", err)
 			}
 		} else {
 			session.Client.Disconnect()
@@ -393,7 +409,7 @@ func (m *SessionManager) RemoveSession(userID int) {
 		// Delete the local session DB so GetOrCreateSession starts fresh
 		if session.DBPath != "" {
 			if err := os.Remove(session.DBPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("⚠️ Failed to delete session DB for user %d: %v", userID, err)
+				log.Printf("⚠️ Failed to delete session DB: %v", err)
 			}
 		}
 		delete(m.sessions, userID)
@@ -459,13 +475,13 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			go func(msgID string, imgMsg *waE2E.ImageMessage) {
 				data, err := s.Client.Download(context.Background(), imgMsg)
 				if err != nil {
-					log.Printf("[media/cache] Failed to download image %s: %v", msgID, err)
+					log.Printf("[media/cache] Failed to download image msg=%s: %v", piiFingerprint(msgID), err)
 					return
 				}
 				s.MediaMu.Lock()
 				s.MediaCache[msgID] = data
 				s.MediaMu.Unlock()
-				log.Printf("[media/cache] Cached image %s: %d bytes", msgID, len(data))
+				log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
 			}(v.Info.ID, img)
 
 			hasContent = true
@@ -499,10 +515,10 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			// Desktop (web) messages may arrive before media upload is complete (mediaStage != RESOLVED)
 			// We retry with delays to wait for CDN, then fall back to MediaRetry for phone re-upload
 			go func(msgID string, audioMsg *waE2E.AudioMessage, isPTT bool, msgInfo *types.MessageInfo) {
-				// Log download parameters for debugging
-				log.Printf("[media/cache] Audio download params for %s (ptt=%v): directPath=%s, mediaKeyLen=%d, encSHA256Len=%d, sha256Len=%d, fileLen=%d, url=%s",
-					msgID, isPTT, audioMsg.GetDirectPath(), len(audioMsg.GetMediaKey()),
-					len(audioMsg.GetFileEncSHA256()), len(audioMsg.GetFileSHA256()), audioMsg.GetFileLength(), audioMsg.GetURL())
+				// Log download parameters for debugging without raw identifiers or signed URLs
+				log.Printf("[media/cache] Audio download params msg=%s (ptt=%v): directPath=%s, mediaKeyLen=%d, encSHA256Len=%d, sha256Len=%d, fileLen=%d, url=%s",
+					piiFingerprint(msgID), isPTT, piiPresence(audioMsg.GetDirectPath()), len(audioMsg.GetMediaKey()),
+					len(audioMsg.GetFileEncSHA256()), len(audioMsg.GetFileSHA256()), audioMsg.GetFileLength(), piiPresence(audioMsg.GetURL()))
 
 				// Check if media is "resolved" - has the required fields for download
 				// Analogous to whatsapp-web.js mediaStage === 'RESOLVED'
@@ -521,35 +537,35 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				retryDelays := []time.Duration{0, 2 * time.Second, 3 * time.Second, 4 * time.Second, 3 * time.Second}
 				for attempt, delay := range retryDelays {
 					if delay > 0 {
-						log.Printf("[media/cache] PTT %s: retry %d/%d after %v", msgID, attempt, len(retryDelays)-1, delay)
+						log.Printf("[media/cache] PTT msg=%s: retry %d/%d after %v", piiFingerprint(msgID), attempt, len(retryDelays)-1, delay)
 						time.Sleep(delay)
 					}
 
 					// Check if media is resolved before attempting download
 					if !isResolved() {
-						log.Printf("[media/cache] Audio %s attempt %d: media not resolved (missing directPath/mediaKey/hash)", msgID, attempt+1)
+						log.Printf("[media/cache] Audio msg=%s attempt %d: media not resolved (missing directPath/mediaKey/hash)", piiFingerprint(msgID), attempt+1)
 						continue
 					}
 
 					data, err = s.Client.Download(context.Background(), audioMsg)
 					if err != nil {
-						log.Printf("[media/cache] Audio %s attempt %d: Download error: %v", msgID, attempt+1, err)
+						log.Printf("[media/cache] Audio msg=%s attempt %d: Download error: %v", piiFingerprint(msgID), attempt+1, err)
 						continue
 					}
 
 					if len(data) > 0 {
-						log.Printf("[media/cache] Audio %s attempt %d: success, %d bytes", msgID, attempt+1, len(data))
+						log.Printf("[media/cache] Audio msg=%s attempt %d: success, %d bytes", piiFingerprint(msgID), attempt+1, len(data))
 						break
 					}
 
-					log.Printf("[media/cache] Audio %s attempt %d: 0 bytes (CDN not ready)", msgID, attempt+1)
+					log.Printf("[media/cache] Audio msg=%s attempt %d: 0 bytes (CDN not ready)", piiFingerprint(msgID), attempt+1)
 
 					// On first 0-byte response, proactively send MediaRetryReceipt
 					// This may trigger desktop/phone to complete/retry the upload
 					if attempt == 0 && isPTT && msgInfo != nil {
-						log.Printf("[media/retry] PTT %s: sending early MediaRetryReceipt to trigger re-upload", msgID)
+						log.Printf("[media/retry] PTT msg=%s: sending early MediaRetryReceipt to trigger re-upload", piiFingerprint(msgID))
 						if retryErr := s.Client.SendMediaRetryReceipt(context.Background(), msgInfo, audioMsg.GetMediaKey()); retryErr != nil {
-							log.Printf("[media/retry] Early MediaRetryReceipt failed for %s: %v", msgID, retryErr)
+							log.Printf("[media/retry] Early MediaRetryReceipt failed for msg=%s: %v", piiFingerprint(msgID), retryErr)
 						}
 					}
 				}
@@ -558,14 +574,14 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					s.MediaMu.Lock()
 					s.MediaCache[msgID] = data
 					s.MediaMu.Unlock()
-					log.Printf("[media/cache] Cached audio %s: %d bytes (ptt=%v)", msgID, len(data), isPTT)
+					log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
 					return
 				}
 
 				// All retries failed - for PTT, try MediaRetry as last resort (asks phone to re-upload)
 				// This works for phone-originated messages but may not help desktop-originated ones
 				if isPTT && msgInfo != nil {
-					log.Printf("[media/retry] PTT %s: all download attempts failed, sending MediaRetryReceipt to phone", msgID)
+					log.Printf("[media/retry] PTT msg=%s: all download attempts failed, sending MediaRetryReceipt to phone", piiFingerprint(msgID))
 
 					// Store pending retry info for when we receive events.MediaRetry
 					s.PendingRetriesMu.Lock()
@@ -578,16 +594,16 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					s.PendingRetriesMu.Unlock()
 
 					if retryErr := s.Client.SendMediaRetryReceipt(context.Background(), msgInfo, audioMsg.GetMediaKey()); retryErr != nil {
-						log.Printf("[media/retry] MediaRetryReceipt failed for %s: %v", msgID, retryErr)
+						log.Printf("[media/retry] MediaRetryReceipt failed for msg=%s: %v", piiFingerprint(msgID), retryErr)
 						// Clean up pending retry on failure
 						s.PendingRetriesMu.Lock()
 						delete(s.PendingRetries, msgID)
 						s.PendingRetriesMu.Unlock()
 					} else {
-						log.Printf("[media/retry] PTT %s: MediaRetryReceipt sent, waiting for events.MediaRetry response", msgID)
+						log.Printf("[media/retry] PTT msg=%s: MediaRetryReceipt sent, waiting for events.MediaRetry response", piiFingerprint(msgID))
 					}
 				} else {
-					log.Printf("[media/cache] WARNING: Audio %s download failed after all retries, 0 bytes (ptt=%v)", msgID, isPTT)
+					log.Printf("[media/cache] WARNING: Audio msg=%s download failed after all retries, 0 bytes (ptt=%v)", piiFingerprint(msgID), isPTT)
 				}
 			}(v.Info.ID, audio, payload.IsPTT, &v.Info)
 
@@ -665,7 +681,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				select {
 				case s.EventChan <- MessageEvent{Type: "message", Payload: contactPayload}:
 				default:
-					log.Printf("Event channel full for user %d, dropping contact", s.UserID)
+					log.Printf("Event channel full, dropping contact event")
 				}
 			}
 			// Don't set hasContent since we've already sent the events
@@ -693,7 +709,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			select {
 			case s.EventChan <- MessageEvent{Type: "message", Payload: payload}:
 			default:
-				log.Printf("Event channel full for user %d, dropping message", s.UserID)
+				log.Printf("Event channel full, dropping message event")
 			}
 		}
 
@@ -708,8 +724,8 @@ func (s *UserSession) handleEvent(evt interface{}) {
 // It decrypts the notification to get the new DirectPath and downloads the media
 func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	msgID := string(evt.MessageID)
-	log.Printf("[media/retry] Received MediaRetry event for message %s (chat=%s, fromMe=%v)",
-		msgID, evt.ChatID.String(), evt.FromMe)
+	log.Printf("[media/retry] Received MediaRetry event msg=%s (chat=%s, fromMe=%v)",
+		piiFingerprint(msgID), piiFingerprint(evt.ChatID.String()), evt.FromMe)
 
 	// Look up pending retry
 	s.PendingRetriesMu.RLock()
@@ -717,7 +733,7 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	s.PendingRetriesMu.RUnlock()
 
 	if !ok {
-		log.Printf("[media/retry] No pending retry found for message %s, ignoring", msgID)
+		log.Printf("[media/retry] No pending retry found for msg=%s, ignoring", piiFingerprint(msgID))
 		return
 	}
 
@@ -731,23 +747,23 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	// Decrypt the notification to get the new DirectPath
 	retryData, err := whatsmeow.DecryptMediaRetryNotification(evt, pending.MediaKey)
 	if err != nil {
-		log.Printf("[media/retry] Failed to decrypt MediaRetry notification for %s: %v", msgID, err)
+		log.Printf("[media/retry] Failed to decrypt MediaRetry notification for msg=%s: %v", piiFingerprint(msgID), err)
 		return
 	}
 
 	// Check result
 	if retryData.GetResult() != waMmsRetry.MediaRetryNotification_SUCCESS {
-		log.Printf("[media/retry] MediaRetry failed for %s: result=%v", msgID, retryData.GetResult())
+		log.Printf("[media/retry] MediaRetry failed for msg=%s: result=%v", piiFingerprint(msgID), retryData.GetResult())
 		return
 	}
 
 	newDirectPath := retryData.GetDirectPath()
 	if newDirectPath == "" {
-		log.Printf("[media/retry] MediaRetry for %s succeeded but no DirectPath in response", msgID)
+		log.Printf("[media/retry] MediaRetry for msg=%s succeeded but no DirectPath in response", piiFingerprint(msgID))
 		return
 	}
 
-	log.Printf("[media/retry] Got new DirectPath for %s: %s", msgID, newDirectPath)
+	log.Printf("[media/retry] Got new DirectPath for msg=%s: %s", piiFingerprint(msgID), piiPresence(newDirectPath))
 
 	// Download using the new DirectPath
 	data, err := s.Client.DownloadMediaWithPath(
@@ -762,12 +778,12 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	)
 
 	if err != nil {
-		log.Printf("[media/retry] Download with new DirectPath failed for %s: %v", msgID, err)
+		log.Printf("[media/retry] Download with new DirectPath failed for msg=%s: %v", piiFingerprint(msgID), err)
 		return
 	}
 
 	if len(data) == 0 {
-		log.Printf("[media/retry] Download with new DirectPath returned 0 bytes for %s", msgID)
+		log.Printf("[media/retry] Download with new DirectPath returned 0 bytes for msg=%s", piiFingerprint(msgID))
 		return
 	}
 
@@ -775,7 +791,7 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	s.MediaMu.Lock()
 	s.MediaCache[msgID] = data
 	s.MediaMu.Unlock()
-	log.Printf("[media/retry] SUCCESS: Cached audio %s: %d bytes (ptt=%v) via MediaRetry", msgID, len(data), pending.IsPTT)
+	log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -891,7 +907,7 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 		case code := <-session.QRChannel:
 			fmt.Fprintf(w, "event: qr\ndata: %s\n\n", code)
 			flusher.Flush()
-			log.Printf("📱 QR code generated for user %d (length: %d)", userID, len(code))
+			log.Printf("📱 QR code generated (length: %d)", len(code))
 
 		case <-session.LoginDone:
 			fmt.Fprintf(w, "event: success\ndata: logged_in\n\n")
@@ -1713,7 +1729,7 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		cachedData, found := session.MediaCache[req.MessageID]
 		session.MediaMu.RUnlock()
 		if found {
-			log.Printf("[media/download] Cache hit for %s: %d bytes", req.MessageID, len(cachedData))
+			log.Printf("[media/download] Cache hit for msg=%s: %d bytes", piiFingerprint(req.MessageID), len(cachedData))
 			// Remove from cache after serving
 			session.MediaMu.Lock()
 			delete(session.MediaCache, req.MessageID)
@@ -1725,13 +1741,13 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		log.Printf("[media/download] Cache miss for %s, trying direct download", req.MessageID)
+		log.Printf("[media/download] Cache miss for msg=%s, trying direct download", piiFingerprint(req.MessageID))
 	}
 
 	// Fallback: try to reconstruct and download
 	// Use DownloadMediaWithPath which internally refreshes mediaConn for fresh auth tokens
-	log.Printf("[media/download] Downloading %s (ptt=%v) for user %d, fileLen=%d",
-		req.MimeType, req.IsPTT, req.UserID, req.FileLength)
+	log.Printf("[media/download] Downloading mime=%s (ptt=%v), fileLen=%d",
+		req.MimeType, req.IsPTT, req.FileLength)
 
 	var data []byte
 	var err error

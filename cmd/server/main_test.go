@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,36 @@ func TestEncryptDecrypt(t *testing.T) {
 			t.Error("expected error for too-short ciphertext")
 		}
 	})
+}
+
+func TestPIIFingerprint(t *testing.T) {
+	t.Run("returns stable hash for same input", func(t *testing.T) {
+		first := piiFingerprint("1234567890@s.whatsapp.net")
+		second := piiFingerprint("1234567890@s.whatsapp.net")
+		if first != second {
+			t.Fatalf("expected stable fingerprint, got %q vs %q", first, second)
+		}
+		if first == "1234567890@s.whatsapp.net" || first == "" {
+			t.Fatalf("expected redacted fingerprint, got %q", first)
+		}
+	})
+
+	t.Run("handles empty input", func(t *testing.T) {
+		if got := piiFingerprint(""); got != "none" {
+			t.Fatalf("expected none, got %q", got)
+		}
+	})
+}
+
+func TestPIIPresence(t *testing.T) {
+	if got := piiPresence(""); got != "absent" {
+		t.Fatalf("expected absent, got %q", got)
+	}
+
+	got := piiPresence("/v/t62.7117-24/signed-token")
+	if !strings.Contains(got, "present(hash=") || strings.Contains(got, "signed-token") {
+		t.Fatalf("expected redacted presence summary, got %q", got)
+	}
 }
 
 func TestSessionManager_GetSession(t *testing.T) {
@@ -1167,10 +1198,10 @@ func TestGetGroupInfoHandler(t *testing.T) {
 		manager = setupTestManager(t)
 		mock := NewLoggedInMockClient()
 		mock.GroupInfo = &types.GroupInfo{
-			JID:       types.JID{User: "group123", Server: types.GroupServer},
-			GroupName: types.GroupName{Name: "My Group"},
+			JID:        types.JID{User: "group123", Server: types.GroupServer},
+			GroupName:  types.GroupName{Name: "My Group"},
 			GroupTopic: types.GroupTopic{Topic: "Group topic"},
-			OwnerJID:  types.JID{User: "owner", Server: types.DefaultUserServer},
+			OwnerJID:   types.JID{User: "owner", Server: types.DefaultUserServer},
 			Participants: []types.GroupParticipant{
 				{JID: types.JID{User: "user1", Server: types.DefaultUserServer}, IsAdmin: true},
 				{JID: types.JID{User: "user2", Server: types.DefaultUserServer}, IsAdmin: false},
@@ -1499,7 +1530,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 		session := makeTestSession()
 
 		evt := &events.Message{
-			Info:    makeInfo("msg-002"),
+			Info: makeInfo("msg-002"),
 			Message: &waE2E.Message{
 				ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 					Text: ptr("Extended text message"),
