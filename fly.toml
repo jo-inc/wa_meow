@@ -4,6 +4,10 @@ primary_region = "sjc"
 [build]
   dockerfile = "Dockerfile"
 
+[metrics]
+  port = 8090
+  path = "/metrics"
+
 [[services]]
   internal_port = 8090
   protocol = "tcp"

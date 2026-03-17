@@ -20,6 +20,7 @@ import (
 	"time"
 
 	sentry "github.com/getsentry/sentry-go"
+	// prometheus client imported via metrics.go
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
@@ -126,7 +127,7 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Printf("Warning: could not create data dir: %v", err)
 	}
-	
+
 	var encryptKey []byte
 	if encryptKeyB64 != "" {
 		var err error
@@ -136,7 +137,7 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 			encryptKey = nil
 		}
 	}
-	
+
 	return &SessionManager{
 		sessions:           make(map[int]*UserSession),
 		dataDir:            dataDir,
@@ -150,22 +151,22 @@ func (m *SessionManager) encrypt(data []byte) (string, error) {
 	if m.encryptKey == nil {
 		return "", fmt.Errorf("no encryption key")
 	}
-	
+
 	block, err := aes.NewCipher(m.encryptKey)
 	if err != nil {
 		return "", err
 	}
-	
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
 	}
-	
+
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	
+
 	ciphertext := gcm.Seal(nonce, nonce, data, nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
@@ -174,26 +175,26 @@ func (m *SessionManager) decrypt(encoded string) ([]byte, error) {
 	if m.encryptKey == nil {
 		return nil, fmt.Errorf("no encryption key")
 	}
-	
+
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	block, err := aes.NewCipher(m.encryptKey)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if len(data) < gcm.NonceSize() {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
-	
+
 	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
@@ -202,7 +203,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 	if m.joBotURL == "" || m.encryptKey == nil {
 		return nil
 	}
-	
+
 	url := fmt.Sprintf("%s/api/whatsapp/session?user_id=%d", m.joBotURL, userID)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -215,38 +216,38 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 		return nil
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode == http.StatusNotFound {
 		return nil
 	}
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
-	
+
 	var result struct {
 		Data string `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil
 	}
-	
+
 	if result.Data == "" {
 		return nil
 	}
-	
+
 	dbData, err := m.decrypt(result.Data)
 	if err != nil {
 		log.Printf("Failed to decrypt session: %v", err)
 		return nil
 	}
-	
+
 	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
 	if err := os.WriteFile(dbPath, dbData, 0600); err != nil {
 		log.Printf("Failed to write session db: %v", err)
 		return err
 	}
-	
+
 	log.Printf("✅ Restored session for user %d from jo_bot", userID)
 	return nil
 }
@@ -255,24 +256,24 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	if m.joBotURL == "" || m.encryptKey == nil {
 		return nil
 	}
-	
+
 	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
 	dbData, err := os.ReadFile(dbPath)
 	if err != nil {
 		return err
 	}
-	
+
 	encrypted, err := m.encrypt(dbData)
 	if err != nil {
 		return err
 	}
-	
+
 	payload := map[string]interface{}{
 		"user_id": userID,
 		"data":    encrypted,
 	}
 	jsonData, _ := json.Marshal(payload)
-	
+
 	url := fmt.Sprintf("%s/api/whatsapp/session", m.joBotURL)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
 	if err != nil {
@@ -286,12 +287,12 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Failed to save session: status %d", resp.StatusCode)
 		return fmt.Errorf("save failed: %d", resp.StatusCode)
 	}
-	
+
 	log.Printf("✅ Saved session for user %d to jo_bot", userID)
 	return nil
 }
@@ -324,7 +325,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
 	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
-	
+
 	// Configure a custom HTTP client for media downloads that mimics Baileys:
 	// 1. Remove Referer header (Baileys doesn't send it)
 	// 2. Force HTTP/1.1 to avoid potential HTTP/2 fingerprinting issues
@@ -342,7 +343,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 		Transport: customTransport,
 		Timeout:   60 * time.Second,
 	})
-	
+
 	client := newRealClientWrapper(rawClient)
 
 	session := &UserSession{
@@ -363,6 +364,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	})
 
 	m.sessions[userID] = session
+	activeSessions.Inc()
 	return session, nil
 }
 
@@ -395,6 +397,7 @@ func (m *SessionManager) RemoveSession(userID int) {
 			}
 		}
 		delete(m.sessions, userID)
+		activeSessions.Dec()
 	}
 }
 
@@ -409,6 +412,7 @@ func (m *SessionManager) SaveSession(userID int) {
 func (s *UserSession) handleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
+		eventStart := time.Now()
 		payload := MessagePayload{
 			ID:         v.Info.ID,
 			ChatJID:    v.Info.Chat.String(),
@@ -450,7 +454,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			if img.FileLength != nil {
 				payload.FileLength = *img.FileLength
 			}
-			
+
 			// Test: download image immediately to compare with PTT download
 			go func(msgID string, imgMsg *waE2E.ImageMessage) {
 				data, err := s.Client.Download(context.Background(), imgMsg)
@@ -463,7 +467,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				s.MediaMu.Unlock()
 				log.Printf("[media/cache] Cached image %s: %d bytes", msgID, len(data))
 			}(v.Info.ID, img)
-			
+
 			hasContent = true
 		}
 
@@ -490,7 +494,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			if audio.FileLength != nil {
 				payload.FileLength = *audio.FileLength
 			}
-			
+
 			// Download audio with retry loop for desktop-originated messages
 			// Desktop (web) messages may arrive before media upload is complete (mediaStage != RESOLVED)
 			// We retry with delays to wait for CDN, then fall back to MediaRetry for phone re-upload
@@ -586,7 +590,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					log.Printf("[media/cache] WARNING: Audio %s download failed after all retries, 0 bytes (ptt=%v)", msgID, isPTT)
 				}
 			}(v.Info.ID, audio, payload.IsPTT, &v.Info)
-			
+
 			hasContent = true
 		}
 
@@ -668,6 +672,24 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		}
 
 		if hasContent {
+			// Record inbound message metric
+			msgType := "text"
+			if payload.MediaType != "" {
+				switch payload.MediaType {
+				case "ptt", "audio", "voice":
+					msgType = "voice"
+				case "image", "document", "location", "video", "contact", "live_location", "media":
+					msgType = "media"
+				default:
+					msgType = payload.MediaType
+				}
+			}
+			if msgType != "text" && msgType != "media" && msgType != "voice" {
+				msgType = "media"
+			}
+			messagesTotal.WithLabelValues("inbound", msgType).Inc()
+			observeMessageProcessing(msgType, eventStart)
+
 			select {
 			case s.EventChan <- MessageEvent{Type: "message", Payload: payload}:
 			default:
@@ -824,6 +846,7 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !session.Client.IsConnected() {
+		sessionReconnectsTotal.Inc()
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
 			errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -1039,12 +1062,15 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sendStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("text", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	messagesTotal.WithLabelValues("outbound", "text").Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1089,21 +1115,24 @@ func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 	msg := &waE2E.Message{
 		ReactionMessage: &waE2E.ReactionMessage{
 			Key: &waCommon.MessageKey{
-				RemoteJID:   proto.String(req.ChatJID),
-				FromMe:      proto.Bool(true),
-				ID:          proto.String(req.MessageID),
+				RemoteJID: proto.String(req.ChatJID),
+				FromMe:    proto.Bool(true),
+				ID:        proto.String(req.MessageID),
 			},
 			Text:              proto.String(req.Emoji),
 			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
 		},
 	}
 
+	sendStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("text", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	messagesTotal.WithLabelValues("outbound", "text").Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1276,12 +1305,15 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	sendStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("media", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	messagesTotal.WithLabelValues("outbound", "media").Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1295,12 +1327,12 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		UserID     int    `json:"user_id"`
-		ChatJID    string `json:"chat_jid"`
-		AudioB64   string `json:"audio_b64"`   // Base64 encoded audio
-		MimeType   string `json:"mime_type"`   // e.g. "audio/ogg; codecs=opus"
-		PTT        bool   `json:"ptt"`         // Push-to-talk (voice note mode)
-		Seconds    uint32 `json:"seconds"`     // Duration in seconds
+		UserID   int    `json:"user_id"`
+		ChatJID  string `json:"chat_jid"`
+		AudioB64 string `json:"audio_b64"` // Base64 encoded audio
+		MimeType string `json:"mime_type"` // e.g. "audio/ogg; codecs=opus"
+		PTT      bool   `json:"ptt"`       // Push-to-talk (voice note mode)
+		Seconds  uint32 `json:"seconds"`   // Duration in seconds
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
@@ -1349,22 +1381,29 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 		FileLength:    proto.Uint64(uint64(len(audioData))),
 		PTT:           proto.Bool(req.PTT),
 	}
-	
+
 	// Set duration if provided
 	if req.Seconds > 0 {
 		audioMsg.Seconds = proto.Uint32(req.Seconds)
 	}
-	
+
 	msg := &waE2E.Message{
 		AudioMessage: audioMsg,
 	}
 
+	msgStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("voice", msgStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	msgType := "media"
+	if req.PTT {
+		msgType = "voice"
+	}
+	messagesTotal.WithLabelValues("outbound", msgType).Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1433,12 +1472,15 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	sendStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("media", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	messagesTotal.WithLabelValues("outbound", "media").Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1490,12 +1532,15 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	sendStart := time.Now()
 	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	observeMessageProcessing("text", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	messagesTotal.WithLabelValues("outbound", "text").Inc()
 	jsonResponse(w, map[string]interface{}{
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
@@ -1503,20 +1548,20 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type GroupInfoPayload struct {
-	JID          string              `json:"jid"`
-	Name         string              `json:"name"`
-	Topic        string              `json:"topic"`
-	Created      int64               `json:"created"`
-	CreatorJID   string              `json:"creator_jid"`
-	Participants []ParticipantInfo   `json:"participants"`
-	IsAnnounce   bool                `json:"is_announce"`
-	IsLocked     bool                `json:"is_locked"`
+	JID          string            `json:"jid"`
+	Name         string            `json:"name"`
+	Topic        string            `json:"topic"`
+	Created      int64             `json:"created"`
+	CreatorJID   string            `json:"creator_jid"`
+	Participants []ParticipantInfo `json:"participants"`
+	IsAnnounce   bool              `json:"is_announce"`
+	IsLocked     bool              `json:"is_locked"`
 }
 
 type ParticipantInfo struct {
-	JID     string `json:"jid"`
-	IsAdmin bool   `json:"is_admin"`
-	IsSuperAdmin bool `json:"is_super_admin"`
+	JID          string `json:"jid"`
+	IsAdmin      bool   `json:"is_admin"`
+	IsSuperAdmin bool   `json:"is_super_admin"`
 }
 
 func getGroupInfoHandler(w http.ResponseWriter, r *http.Request) {
@@ -1685,12 +1730,12 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback: try to reconstruct and download
 	// Use DownloadMediaWithPath which internally refreshes mediaConn for fresh auth tokens
-	log.Printf("[media/download] Downloading %s (ptt=%v) for user %d, fileLen=%d", 
+	log.Printf("[media/download] Downloading %s (ptt=%v) for user %d, fileLen=%d",
 		req.MimeType, req.IsPTT, req.UserID, req.FileLength)
-	
+
 	var data []byte
 	var err error
-	
+
 	// Determine media type and mmsType based on mime
 	// Note: PTT uses mmsType="audio" same as regular audio (Baileys has no 'ptt' in MEDIA_PATH_MAP)
 	var mediaType whatsmeow.MediaType
@@ -1708,18 +1753,18 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		mediaType = whatsmeow.MediaDocument
 		mmsType = "document"
 	}
-	
+
 	// Retry with exponential backoff - CDN returns 26-byte empty stub for stale auth
 	maxRetries := 4
 	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second}
-	
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := backoffs[attempt-1]
 			log.Printf("[media/download] Retry %d/%d after %v", attempt, maxRetries, backoff)
 			time.Sleep(backoff)
 		}
-		
+
 		data, err = session.Client.DownloadMediaWithPath(
 			context.Background(),
 			req.DirectPath,
@@ -1730,20 +1775,20 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 			mediaType,
 			mmsType,
 		)
-		
+
 		log.Printf("[media/download] Attempt %d: dataLen=%d, err=%v", attempt+1, len(data), err)
-		
+
 		if err != nil {
 			continue
 		}
-		
+
 		if len(data) > 0 {
 			break
 		}
-		
+
 		log.Printf("[media/download] Attempt %d: got 0 bytes (stale auth, will retry)", attempt+1)
 	}
-	
+
 	if err != nil {
 		log.Printf("[media/download] All attempts failed: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to download: "+err.Error())
@@ -1791,24 +1836,25 @@ func main() {
 
 	manager = NewSessionManager(dataDir, joBotURL, encryptKey)
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/sessions", createSessionHandler)
-	http.HandleFunc("/sessions/qr", getQRHandler)
-	http.HandleFunc("/sessions/status", getStatusHandler)
-	http.HandleFunc("/sessions/delete", deleteSessionHandler)
-	http.HandleFunc("/sessions/save", saveSessionHandler)
-	http.HandleFunc("/chats", getChatsHandler)
-	http.HandleFunc("/groups/info", getGroupInfoHandler)
-	http.HandleFunc("/groups/participants", listGroupParticipantsHandler)
-	http.HandleFunc("/messages/send", sendMessageHandler)
-	http.HandleFunc("/messages/typing", setTypingHandler)
-	http.HandleFunc("/messages/react", sendReactionHandler)
-	http.HandleFunc("/messages/image", sendImageHandler)
-	http.HandleFunc("/messages/audio", sendAudioHandler)
-	http.HandleFunc("/messages/document", sendDocumentHandler)
-	http.HandleFunc("/messages/location", sendLocationHandler)
-	http.HandleFunc("/media/download", downloadMediaHandler)
-	http.HandleFunc("/events", eventsHandler)
+	http.HandleFunc("/health", instrumentHandler("health", healthHandler))
+	http.Handle("/metrics", metricsHandler())
+	http.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
+	http.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
+	http.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))
+	http.HandleFunc("/sessions/delete", instrumentHandler("sessions_delete", deleteSessionHandler))
+	http.HandleFunc("/sessions/save", instrumentHandler("sessions_save", saveSessionHandler))
+	http.HandleFunc("/chats", instrumentHandler("chats", getChatsHandler))
+	http.HandleFunc("/groups/info", instrumentHandler("groups_info", getGroupInfoHandler))
+	http.HandleFunc("/groups/participants", instrumentHandler("groups_participants", listGroupParticipantsHandler))
+	http.HandleFunc("/messages/send", instrumentHandler("messages_send", sendMessageHandler))
+	http.HandleFunc("/messages/typing", instrumentHandler("messages_typing", setTypingHandler))
+	http.HandleFunc("/messages/react", instrumentHandler("messages_react", sendReactionHandler))
+	http.HandleFunc("/messages/image", instrumentHandler("messages_image", sendImageHandler))
+	http.HandleFunc("/messages/audio", instrumentHandler("messages_audio", sendAudioHandler))
+	http.HandleFunc("/messages/document", instrumentHandler("messages_document", sendDocumentHandler))
+	http.HandleFunc("/messages/location", instrumentHandler("messages_location", sendLocationHandler))
+	http.HandleFunc("/media/download", instrumentHandler("media_download", downloadMediaHandler))
+	http.HandleFunc("/events", instrumentHandler("events", eventsHandler))
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
 	log.Printf("📁 Data directory: %s", dataDir)
