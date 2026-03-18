@@ -85,6 +85,12 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func observeMessageProcessing(msgType string, start time.Time) {
 	messageProcessingSeconds.WithLabelValues(msgType).Observe(time.Since(start).Seconds())
 }
