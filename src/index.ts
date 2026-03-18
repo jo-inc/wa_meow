@@ -8,6 +8,7 @@
 import { WhatsAppClient } from "./client.js";
 import { createWaMeowOnboardingAdapter, type ChannelOnboardingAdapter } from "./onboarding.js";
 import { monitorWaMeowProvider } from "./monitor.js";
+import { redactForLog } from "./redaction.js";
 import { spawn, ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
@@ -450,7 +451,7 @@ function createChannelPlugin(): ChannelPlugin {
         // Check if chatId contains our phone number (self-chat)
         const isSelfChat = chatIdNormalized.includes(selfPhone);
         if (!isSelfChat) {
-          log.error(`wa_meow: BLOCKED send to non-self-chat: ${ctx.chatId}`);
+          log.error(`wa_meow: BLOCKED send to non-self-chat chat=${redactForLog(ctx.chatId)}`);
           throw new Error("wa_meow only allows sending to self-chat");
         }
 
@@ -482,7 +483,7 @@ function createChannelPlugin(): ChannelPlugin {
         const chatIdNormalized = ctx.chatId.replace(/:\d+@/, "@");
         const isSelfChat = chatIdNormalized.includes(selfPhone);
         if (!isSelfChat) {
-          log.error(`wa_meow: BLOCKED media send to non-self-chat: ${ctx.chatId}`);
+          log.error(`wa_meow: BLOCKED media send to non-self-chat chat=${redactForLog(ctx.chatId)}`);
           throw new Error("wa_meow only allows sending to self-chat");
         }
 
@@ -512,7 +513,7 @@ function createChannelPlugin(): ChannelPlugin {
           throw new Error(`Unknown account: ${accountId}`);
         }
 
-        log.info(`Starting gateway for account ${accountId} (userId: ${userId})`);
+        log.info(`Starting gateway for account ${accountId}`);
 
         // Start the Go server if not running
         const serverUrl = config.serverUrl || "http://localhost:8090";
@@ -605,7 +606,7 @@ function createChannelPlugin(): ChannelPlugin {
         });
 
         const ctxLog = ctx.log || log;
-        ctxLog.info(`[${ctx.accountId}] Starting wa_meow provider (userId: ${userId})`);
+        ctxLog.info(`[${ctx.accountId}] Starting wa_meow provider`);
 
         // Start the Go server if not running
         const serverUrl = config.serverUrl || "http://localhost:8090";
@@ -640,7 +641,7 @@ function createChannelPlugin(): ChannelPlugin {
           return { message: `Unknown account: ${accountId}` };
         }
 
-        log.info(`Starting QR login for account ${accountId} (userId: ${userId})`);
+        log.info(`Starting QR login for account ${accountId}`);
 
         // Start the Go server if not running
         const serverUrl = config.serverUrl || "http://localhost:8090";

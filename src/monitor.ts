@@ -4,6 +4,7 @@
 
 import { EventSource } from "eventsource";
 import type { WhatsAppClient, MessageEvent } from "./client.js";
+import { redactForLog } from "./redaction.js";
 
 // Minimal types from openclaw/plugin-sdk
 // These match the PluginRuntime interface
@@ -175,10 +176,10 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
   try {
     const status = await client.getStatus(userId);
     if (!status.logged_in) {
-      logger.warn(`wa_meow: User ${userId} not logged in, skipping monitor`);
+      logger.warn("wa_meow: Account not logged in, skipping monitor");
       return;
     }
-    logger.info(`wa_meow: Monitoring user ${userId} (${status.phone || "unknown"})`);
+    logger.info("wa_meow: Monitoring linked account");
   } catch (err) {
     logger.error(`wa_meow: Failed to check status: ${err}`);
     return;
@@ -256,7 +257,7 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
 
     es.onopen = () => {
       reconnectAttempts = 0;
-      logger.info(`wa_meow: SSE connection established for user ${userId}`);
+      logger.info("wa_meow: SSE connection established");
     };
 
     es.onerror = () => {
@@ -306,7 +307,7 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
         return;
       }
 
-      logger.info(`wa_meow: Received self-chat message: ${bodyText.slice(0, 50)}...`);
+      logger.info(`wa_meow: Received self-chat message body=${redactForLog(bodyText)}`);
 
       // Record activity
       runtime.channel.activity.record({
@@ -364,7 +365,7 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
 
             try {
               await client.sendMessage(userId, payload.chat_jid, text);
-              logVerbose(`wa_meow: Sent reply to ${payload.chat_jid}`);
+              logVerbose(`wa_meow: Sent reply to chat=${redactForLog(payload.chat_jid)}`);
               
               runtime.channel.activity.record({
                 channel: "wa_meow",
@@ -401,7 +402,7 @@ export async function monitorWaMeowProvider(opts: MonitorWaMeowOpts): Promise<vo
   // Handle abort
   const cleanup = () => {
     currentEs?.close();
-    logger.info(`wa_meow: Monitor stopped for user ${userId}`);
+    logger.info("wa_meow: Monitor stopped");
   };
 
   if (abortSignal) {

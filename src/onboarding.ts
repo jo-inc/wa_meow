@@ -3,6 +3,7 @@
  */
 
 import type { WhatsAppClient } from "./client.js";
+import { closeSync, openSync, writeSync } from "fs";
 // @ts-ignore - no types available
 import qrcode from "qrcode-terminal";
 
@@ -146,6 +147,31 @@ function setWaMeowAccount(
       },
     },
   };
+}
+
+function renderQRCodeToTTY(qrCode: string): boolean {
+  let rendered = "";
+  qrcode.generate(qrCode, { small: true }, (qr: string) => {
+    rendered = qr;
+  });
+
+  if (!rendered) {
+    return false;
+  }
+
+  let ttyFd: number | null = null;
+  try {
+    ttyFd = openSync("/dev/tty", "w");
+    writeSync(ttyFd, "\nScan this QR code in WhatsApp → Linked Devices:\n");
+    writeSync(ttyFd, `${rendered}\n`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (ttyFd !== null) {
+      closeSync(ttyFd);
+    }
+  }
 }
 
 export function createWaMeowOnboardingAdapter(
@@ -323,13 +349,13 @@ export function createWaMeowOnboardingAdapter(
           }
 
           if (result.qrCode) {
-            // Display QR code in terminal
-            console.log("\nScan this QR code in WhatsApp → Linked Devices:");
-            qrcode.generate(result.qrCode, { small: true });
+            const rendered = renderQRCodeToTTY(result.qrCode);
 
             // Wait for scan
             await prompter.note(
-              "Waiting for QR code scan (timeout: 2 minutes)...",
+              rendered
+                ? "Waiting for QR code scan (timeout: 2 minutes)..."
+                : "Couldn't display the QR code in this terminal. Please rerun the QR flow from an interactive terminal.",
               "WhatsApp"
             );
 
