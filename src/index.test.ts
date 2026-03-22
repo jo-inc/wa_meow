@@ -114,23 +114,30 @@ describe("wa_meow plugin", () => {
   };
 
   function createMockAPI(configOverrides = {}) {
+    const channelConfig = {
+      serverUrl: "http://test-server:8090",
+      accounts: {
+        main: { userId: 123, enabled: true },
+        secondary: { userId: 456, enabled: true },
+        disabled: { userId: 789, enabled: false },
+      },
+      ...configOverrides,
+    };
     return {
       registerChannel: vi.fn((opts: { plugin: typeof registeredPlugin }) => {
         registeredPlugin = opts.plugin;
       }),
       runtime: {
         config: {
-          channels: {
-            "wa_meow": {
-              serverUrl: "http://test-server:8090",
-              accounts: {
-                main: { userId: 123, enabled: true },
-                secondary: { userId: 456, enabled: true },
-                disabled: { userId: 789, enabled: false },
-              },
-              ...configOverrides,
+          loadConfig: vi.fn(() => ({
+            channels: {
+              "wa_meow": channelConfig,
             },
-          },
+          })),
+        },
+        logging: {
+          getChildLogger: vi.fn(() => mockLogger),
+          shouldLogVerbose: vi.fn(() => false),
         },
         log: mockLogger,
       },
@@ -159,7 +166,13 @@ describe("wa_meow plugin", () => {
       const api = {
         registerChannel: vi.fn(),
         runtime: {
-          config: { channels: {} },
+          config: {
+            loadConfig: vi.fn(() => ({ channels: {} })),
+          },
+          logging: {
+            getChildLogger: vi.fn(() => mockLogger),
+            shouldLogVerbose: vi.fn(() => false),
+          },
           log: mockLogger,
         },
       };
@@ -191,8 +204,8 @@ describe("wa_meow plugin", () => {
     describe("meta", () => {
       it("should have correct plugin metadata", () => {
         expect(registeredPlugin.id).toBe("wa_meow");
-        expect(registeredPlugin.meta.label).toBe("WhatsApp (whatsmeow)");
-        expect(registeredPlugin.meta.selectionLabel).toBe("Jo WhatsApp");
+        expect(registeredPlugin.meta.label).toBe("wa_meow WhatsApp (self-chat)");
+        expect(registeredPlugin.meta.selectionLabel).toBe("wa_meow WhatsApp (self-chat)");
         expect(registeredPlugin.meta.systemImage).toBe("message.fill");
       });
     });
@@ -206,19 +219,27 @@ describe("wa_meow plugin", () => {
         expect(accountIds).not.toContain("disabled");
       });
 
-      it("should return empty array when no accounts configured", () => {
+      it("should return default account when no accounts configured", () => {
         const api = {
           registerChannel: vi.fn((opts: { plugin: typeof registeredPlugin }) => {
             registeredPlugin = opts.plugin;
           }),
           runtime: {
-            config: { channels: { "wa_meow": {} } },
+            config: {
+              loadConfig: vi.fn(() => ({
+                channels: { "wa_meow": {} },
+              })),
+            },
+            logging: {
+              getChildLogger: vi.fn(() => mockLogger),
+              shouldLogVerbose: vi.fn(() => false),
+            },
             log: mockLogger,
           },
         };
         register(api);
 
-        expect(registeredPlugin.config.listAccountIds()).toEqual([]);
+        expect(registeredPlugin.config.listAccountIds()).toEqual(["default"]);
       });
     });
 
@@ -260,19 +281,24 @@ describe("wa_meow plugin", () => {
 
     describe("outbound.sendText()", () => {
       it("should send text message through client", async () => {
+        mockClientInstance.getStatus.mockResolvedValue({
+          connected: true,
+          logged_in: true,
+          phone: "+1234567890",
+        });
         mockClientInstance.sendMessage.mockResolvedValue({
           id: "msg-123",
           timestamp: 1700000000,
         });
 
         const result = await registeredPlugin.outbound.sendText(
-          { accountId: "main", chatId: "111@s.whatsapp.net" },
+          { accountId: "main", chatId: "1234567890@s.whatsapp.net" },
           "Hello!"
         );
 
         expect(mockClientInstance.sendMessage).toHaveBeenCalledWith(
           123,
-          "111@s.whatsapp.net",
+          "1234567890@s.whatsapp.net",
           "Hello!",
           undefined
         );
@@ -283,6 +309,11 @@ describe("wa_meow plugin", () => {
       });
 
       it("should include replyToMessageId when provided", async () => {
+        mockClientInstance.getStatus.mockResolvedValue({
+          connected: true,
+          logged_in: true,
+          phone: "+1234567890",
+        });
         mockClientInstance.sendMessage.mockResolvedValue({
           id: "msg-456",
           timestamp: 1700000001,
@@ -291,7 +322,7 @@ describe("wa_meow plugin", () => {
         await registeredPlugin.outbound.sendText(
           {
             accountId: "main",
-            chatId: "111@s.whatsapp.net",
+            chatId: "1234567890@s.whatsapp.net",
             replyToMessageId: "original-id",
           },
           "Reply"
@@ -299,7 +330,7 @@ describe("wa_meow plugin", () => {
 
         expect(mockClientInstance.sendMessage).toHaveBeenCalledWith(
           123,
-          "111@s.whatsapp.net",
+          "1234567890@s.whatsapp.net",
           "Reply",
           "original-id"
         );
@@ -317,6 +348,11 @@ describe("wa_meow plugin", () => {
 
     describe("outbound.sendMedia()", () => {
       it("should send image through client", async () => {
+        mockClientInstance.getStatus.mockResolvedValue({
+          connected: true,
+          logged_in: true,
+          phone: "+1234567890",
+        });
         mockClientInstance.sendImage.mockResolvedValue({
           id: "img-123",
           timestamp: 1700000000,
@@ -324,7 +360,7 @@ describe("wa_meow plugin", () => {
 
         const imageData = Buffer.from("fake-image-data");
         const result = await registeredPlugin.outbound.sendMedia!(
-          { accountId: "main", chatId: "111@s.whatsapp.net" },
+          { accountId: "main", chatId: "1234567890@s.whatsapp.net" },
           {
             type: "image",
             data: imageData,
@@ -335,7 +371,7 @@ describe("wa_meow plugin", () => {
 
         expect(mockClientInstance.sendImage).toHaveBeenCalledWith(
           123,
-          "111@s.whatsapp.net",
+          "1234567890@s.whatsapp.net",
           imageData.toString("base64"),
           "image/png",
           "Check this"
@@ -347,9 +383,14 @@ describe("wa_meow plugin", () => {
       });
 
       it("should throw for unsupported media type", async () => {
+        mockClientInstance.getStatus.mockResolvedValue({
+          connected: true,
+          logged_in: true,
+          phone: "+1234567890",
+        });
         await expect(
           registeredPlugin.outbound.sendMedia!(
-            { accountId: "main", chatId: "111@s.whatsapp.net" },
+            { accountId: "main", chatId: "1234567890@s.whatsapp.net" },
             {
               type: "video",
               data: Buffer.from("data"),
@@ -517,7 +558,7 @@ describe("wa_meow plugin", () => {
       const defaultExport = await import("./index.js").then((m) => m.default);
 
       expect(defaultExport.id).toBe("wa_meow");
-      expect(defaultExport.name).toBe("Jo WhatsApp (whatsmeow)");
+      expect(defaultExport.name).toBe("WhatsApp (wa_meow)");
       expect(typeof defaultExport.register).toBe("function");
     });
   });

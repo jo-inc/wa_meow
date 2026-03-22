@@ -1,4 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+const { MockEventSource } = vi.hoisted(() => ({
+  MockEventSource: vi.fn(),
+}));
+vi.mock("eventsource", () => ({
+  EventSource: MockEventSource,
+}));
+
 import { WhatsAppClient } from "./client.js";
 
 const mockFetch = vi.fn();
@@ -435,8 +443,7 @@ describe("WhatsAppClient", () => {
 
   describe("createEventSource()", () => {
     it("should create EventSource with correct URL", () => {
-      const MockEventSource = vi.fn();
-      vi.stubGlobal("EventSource", MockEventSource);
+      MockEventSource.mockClear();
 
       client.createEventSource(123);
 
@@ -448,8 +455,7 @@ describe("WhatsAppClient", () => {
 
   describe("createQREventSource()", () => {
     it("should create EventSource for QR stream", () => {
-      const MockEventSource = vi.fn();
-      vi.stubGlobal("EventSource", MockEventSource);
+      MockEventSource.mockClear();
 
       client.createQREventSource(456);
 
