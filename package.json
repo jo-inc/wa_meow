@@ -1,6 +1,6 @@
 {
   "name": "@askjo/wa_meow",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "WhatsApp bridge powered by whatsmeow 🐱 · OpenClaw plugin",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -57,7 +57,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepare": "npm run build"
   },
   "dependencies": {
     "eventsource": "^4.1.0",

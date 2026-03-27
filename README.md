@@ -28,6 +28,19 @@ channels:
         enabled: true
 ```
 
+## Release Channels
+
+This repo ships two different artifacts:
+
+- **Fly / Docker deploy** — runs the Go HTTP bridge from `cmd/server/`.
+- **npm / GitHub plugin install** — ships the OpenClaw plugin from `src/` compiled into `dist/`, plus the bundled `bin/` binaries.
+
+That means:
+
+- Changes under `cmd/server/` need a Fly deploy.
+- Changes under `src/`, `package.json`, or `openclaw.plugin.json` need a new npm package release.
+- If a change touches both surfaces, release both.
+
 ---
 
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.
@@ -192,6 +205,15 @@ fly apps create my-wa_meow
 fly secrets set WHATSAPP_SESSION_KEY="$(openssl rand -base64 32)"
 fly deploy
 ```
+
+### npm plugin release
+
+```bash
+npm version patch
+npm publish
+```
+
+The package `prepare` step builds `src/` into `dist/`, so both npm publishes and direct GitHub installs include the compiled plugin files.
 
 ### Docker Compose
 
