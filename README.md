@@ -48,11 +48,17 @@ If you're running [OpenClaw](https://openclaw.ai) or building your own AI assist
 ### Option 1: Docker (Recommended)
 
 ```bash
+# Build the image locally
+git clone https://github.com/jo-inc/wa_meow.git
+cd wa_meow
+docker build -t wa_meow .
+
+# Run it
 docker run -d \
   --name wa_meow \
   -p 8090:8090 \
   -v wa_meow-data:/data/whatsapp \
-  ghcr.io/jo-inc/wa_meow:latest
+  wa_meow
 ```
 
 ### Option 2: From Source
@@ -100,10 +106,13 @@ curl -X POST localhost:8090/messages/send \
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/messages/send` | POST | Send text message |
+| `/messages/audio` | POST | Send audio/voice message |
+| `/messages/document` | POST | Send document (PDF, etc.) |
 | `/messages/react` | POST | React to a message with emoji |
 | `/messages/typing` | POST | Send typing indicator |
 | `/chats?user_id=X` | GET | List all chats (contacts + groups) |
 | `/events?user_id=X` | GET | SSE stream of incoming messages |
+| `/media/download` | POST | Download media from a message |
 
 ### Health
 
@@ -158,6 +167,9 @@ data: {"type":"message","payload":{"id":"ABC123","chat_jid":"1234567890@s.whatsa
 | `DATA_DIR` | `/data/whatsapp` | SQLite database storage |
 | `PORT` | `8090` | HTTP server port |
 | `WHATSAPP_SESSION_KEY` | - | Base64 AES-256 key for encrypted session backup |
+| `JO_BOT_URL` | - | Callback URL for session persistence |
+| `JO_WHATSAPP_INTERNAL_TOKEN` | - | Auth token for session API calls |
+| `SENTRY_DSN` | - | Sentry DSN for error tracking (optional) |
 
 ### Session Encryption (Optional)
 
@@ -187,7 +199,7 @@ fly deploy
 version: '3.8'
 services:
   wa_meow:
-    image: ghcr.io/jo-inc/wa_meow:latest
+    build: .
     ports:
       - "8090:8090"
     volumes:
@@ -257,7 +269,6 @@ go install github.com/air-verse/air@latest
 ## Current Limitations
 
 - **No group chat support yet** - You can list groups and send messages to group JIDs, but group-specific features (mentions, replies, admin actions) are not implemented
-- **Text messages only** - No media (images, audio, video, documents) support yet
 - **No message history** - Only receives messages while connected
 
 ## Credits
