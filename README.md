@@ -2,7 +2,7 @@
 
 A lightweight, self-hosted WhatsApp gateway for AI assistants. Built for [OpenClaw](https://openclaw.ai) and similar personal AI agent projects.
 
-> **Production-tested:** This code is extracted from and powers the WhatsApp integration at [askjo.ai](https://askjo.ai).
+> **Production-tested:** This code is extracted from and powers the WhatsApp integration at [askjo.ai](https://askjo.ai?ref=wa_meow).
 
 ## Add to OpenClaw
 
