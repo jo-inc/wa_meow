@@ -67,6 +67,18 @@ type PendingMediaRetry struct {
 	IsPTT     bool
 }
 
+// mediaCacheEntry wraps cached media with a timestamp for TTL eviction
+type mediaCacheEntry struct {
+	data      []byte
+	cachedAt  time.Time
+}
+
+const (
+	mediaCacheTTL     = 5 * time.Minute  // Evict entries older than 5 minutes
+	mediaCacheMaxSize = 200 * 1024 * 1024 // 200MB hard cap
+	mediaCacheEvictInterval = 30 * time.Second // How often to run eviction
+)
+
 type UserSession struct {
 	UserID     int
 	Client     WhatsAppClient
@@ -76,11 +88,81 @@ type UserSession struct {
 	QRChannel  chan string
 	LoginDone  chan bool
 	EventChan  chan MessageEvent
-	MediaCache map[string][]byte // Cache downloaded media by message ID
+	MediaCache map[string]*mediaCacheEntry // Cache downloaded media by message ID
 	MediaMu    sync.RWMutex
+	mediaCacheSize int64 // Current total bytes in cache
 	// Pending media retries: message ID -> pending retry info
 	PendingRetries   map[string]*PendingMediaRetry
 	PendingRetriesMu sync.RWMutex
+}
+
+// mediaCachePut adds an entry to the cache, evicting oldest if over size cap
+func (s *UserSession) mediaCachePut(msgID string, data []byte) {
+	s.MediaMu.Lock()
+	defer s.MediaMu.Unlock()
+
+	// If this message is already cached, remove old size
+	if existing, ok := s.MediaCache[msgID]; ok {
+		s.mediaCacheSize -= int64(len(existing.data))
+	}
+
+	s.MediaCache[msgID] = &mediaCacheEntry{data: data, cachedAt: time.Now()}
+	s.mediaCacheSize += int64(len(data))
+
+	// If over size cap, evict oldest entries until under
+	for s.mediaCacheSize > mediaCacheMaxSize && len(s.MediaCache) > 0 {
+		var oldestID string
+		var oldestTime time.Time
+		for id, entry := range s.MediaCache {
+			if oldestID == "" || entry.cachedAt.Before(oldestTime) {
+				oldestID = id
+				oldestTime = entry.cachedAt
+			}
+		}
+		if oldestID != "" {
+			s.mediaCacheSize -= int64(len(s.MediaCache[oldestID].data))
+			delete(s.MediaCache, oldestID)
+			log.Printf("[media/cache] Evicted msg=%s (size cap), cache size now %dMB", piiFingerprint(oldestID), s.mediaCacheSize/(1024*1024))
+		}
+	}
+}
+
+// mediaCacheGet retrieves and removes an entry from the cache (consume-once)
+func (s *UserSession) mediaCacheGet(msgID string) ([]byte, bool) {
+	s.MediaMu.Lock()
+	defer s.MediaMu.Unlock()
+	entry, ok := s.MediaCache[msgID]
+	if !ok {
+		return nil, false
+	}
+	data := entry.data
+	s.mediaCacheSize -= int64(len(data))
+	delete(s.MediaCache, msgID)
+	return data, true
+}
+
+// startMediaCacheEvictor runs a background goroutine that evicts expired entries
+func (s *UserSession) startMediaCacheEvictor() {
+	go func() {
+		ticker := time.NewTicker(mediaCacheEvictInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.MediaMu.Lock()
+			now := time.Now()
+			var evicted int
+			for id, entry := range s.MediaCache {
+				if now.Sub(entry.cachedAt) > mediaCacheTTL {
+					s.mediaCacheSize -= int64(len(entry.data))
+					delete(s.MediaCache, id)
+					evicted++
+				}
+			}
+			if evicted > 0 {
+				log.Printf("[media/cache] TTL eviction: removed %d entries, cache size now %dMB (%d entries)", evicted, s.mediaCacheSize/(1024*1024), len(s.MediaCache))
+			}
+			s.MediaMu.Unlock()
+		}
+	}()
 }
 
 type MessageEvent struct {
@@ -371,9 +453,11 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 		QRChannel:      make(chan string, 10),
 		LoginDone:      make(chan bool, 1),
 		EventChan:      make(chan MessageEvent, 100),
-		MediaCache:     make(map[string][]byte),
+		MediaCache:     make(map[string]*mediaCacheEntry),
 		PendingRetries: make(map[string]*PendingMediaRetry),
 	}
+
+	session.startMediaCacheEvictor()
 
 	rawClient.AddEventHandler(func(evt interface{}) {
 		session.handleEvent(evt)
@@ -478,9 +562,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					log.Printf("[media/cache] Failed to download image msg=%s: %v", piiFingerprint(msgID), err)
 					return
 				}
-				s.MediaMu.Lock()
-				s.MediaCache[msgID] = data
-				s.MediaMu.Unlock()
+				s.mediaCachePut(msgID, data)
 				log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
 			}(v.Info.ID, img)
 
@@ -571,9 +653,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				}
 
 				if len(data) > 0 {
-					s.MediaMu.Lock()
-					s.MediaCache[msgID] = data
-					s.MediaMu.Unlock()
+					s.mediaCachePut(msgID, data)
 					log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
 					return
 				}
@@ -788,9 +868,7 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 	}
 
 	// Cache the downloaded media
-	s.MediaMu.Lock()
-	s.MediaCache[msgID] = data
-	s.MediaMu.Unlock()
+	s.mediaCachePut(msgID, data)
 	log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
 }
 
@@ -1725,15 +1803,8 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Check cache first (media downloaded immediately on receive)
 	if req.MessageID != "" {
-		session.MediaMu.RLock()
-		cachedData, found := session.MediaCache[req.MessageID]
-		session.MediaMu.RUnlock()
-		if found {
+		if cachedData, found := session.mediaCacheGet(req.MessageID); found {
 			log.Printf("[media/download] Cache hit for msg=%s: %d bytes", piiFingerprint(req.MessageID), len(cachedData))
-			// Remove from cache after serving
-			session.MediaMu.Lock()
-			delete(session.MediaCache, req.MessageID)
-			session.MediaMu.Unlock()
 			jsonResponse(w, map[string]interface{}{
 				"data":      base64.StdEncoding.EncodeToString(cachedData),
 				"mime_type": req.MimeType,

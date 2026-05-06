@@ -34,7 +34,7 @@ func injectMockSession(m *SessionManager, userID int, client *MockWhatsAppClient
 		QRChannel:  make(chan string, 10),
 		LoginDone:  make(chan bool, 1),
 		EventChan:  make(chan MessageEvent, 100),
-		MediaCache: make(map[string][]byte),
+		MediaCache: make(map[string]*mediaCacheEntry),
 	}
 	m.sessions[userID] = session
 	return session
@@ -1484,7 +1484,7 @@ func TestUserSession_handleEvent(t *testing.T) {
 			UserID:     1,
 			Client:     NewLoggedInMockClient(),
 			EventChan:  make(chan MessageEvent, 10),
-			MediaCache: make(map[string][]byte),
+			MediaCache: make(map[string]*mediaCacheEntry),
 		}
 	}
 
