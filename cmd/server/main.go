@@ -908,6 +908,27 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if session.Client.GetStore().GetID() == nil {
+		// Disconnect first to reset QR state (handles retry after cancel).
+		// GetQRChannel only works before Connect, so we must disconnect
+		// if the client was previously connected.
+		if session.Client.IsConnected() {
+			session.Client.Disconnect()
+		}
+
+		// Drain stale QR codes and login signals from previous attempt
+		for {
+			select {
+			case <-session.QRChannel:
+			default:
+				goto qrDrained
+			}
+		}
+	qrDrained:
+		select {
+		case <-session.LoginDone:
+		default:
+		}
+
 		qrChan, _ := session.Client.GetQRChannel(context.Background())
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
