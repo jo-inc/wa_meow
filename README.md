@@ -41,6 +41,16 @@ That means:
 - Changes under `src/`, `package.json`, or `openclaw.plugin.json` need a new npm package release.
 - If a change touches both surfaces, release both.
 
+## Companion X/Twitter workflow
+
+wa_meow gives an OpenClaw agent a WhatsApp channel. If the same agent also needs public X/Twitter automation, install [TweetClaw](https://github.com/Xquik-dev/tweetclaw) beside wa_meow:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+```
+
+Use wa_meow for WhatsApp messages, linked-device login, media delivery, reactions, typing indicators, and SSE events. Use TweetClaw for search tweets, search tweet replies, follower export, user lookup, post tweets, post tweet replies, media upload/download, direct messages, tweet monitors, webhooks, and giveaway draws. Keep WhatsApp bridge settings under `channels.wa_meow`; keep TweetClaw/Xquik credentials in TweetClaw's plugin config or host environment. Visible X/Twitter writes should still go through OpenClaw approval.
+
 ---
 
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.
