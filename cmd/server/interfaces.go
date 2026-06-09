@@ -115,11 +115,11 @@ func (w *realClientWrapper) Download(ctx context.Context, msg whatsmeow.Download
 }
 
 func (w *realClientWrapper) DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength int, mediaType whatsmeow.MediaType, mmsType string) ([]byte, error) {
-	return w.client.DownloadMediaWithPath(ctx, directPath, encFileHash, fileHash, mediaKey, fileLength, mediaType, mmsType)
+	return w.client.DownloadMediaWithPath(ctx, directPath, encFileHash, fileHash, mediaKey, mediaType, mmsType, false)
 }
 
 func (w *realClientWrapper) DownloadAndDecrypt(ctx context.Context, url string, mediaKey []byte, appInfo whatsmeow.MediaType, fileLength int, fileEncSHA256, fileSHA256 []byte) ([]byte, error) {
-	return w.client.DangerousInternals().DownloadAndDecrypt(ctx, url, mediaKey, appInfo, fileLength, fileEncSHA256, fileSHA256)
+	return w.client.DangerousInternals().DownloadAndDecrypt(ctx, url, mediaKey, appInfo, fileEncSHA256, fileSHA256)
 }
 
 func (w *realClientWrapper) AddEventHandler(handler whatsmeow.EventHandler) uint32 {
