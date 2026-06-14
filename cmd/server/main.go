@@ -310,7 +310,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to fetch session from jo_bot backend: request error")
+		log.Printf("Failed to fetch session from jo_bot backend for user %d: %v", userID, err)
 		return nil
 	}
 	defer resp.Body.Close()
@@ -381,7 +381,7 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to save session to jo_bot backend: request error")
+		log.Printf("Failed to save session to jo_bot backend for user %d: %v", userID, err)
 		return err
 	}
 	defer resp.Body.Close()

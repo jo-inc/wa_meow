@@ -34,5 +34,5 @@ primary_region = "sjc"
 
 [env]
   DATA_DIR = "/data/whatsapp"
-  JO_BOT_URL = "http://joprod.internal:8000"
+  JO_BOT_URL = "https://joprod.fly.dev"
   # WHATSAPP_SESSION_KEY set via fly secrets
