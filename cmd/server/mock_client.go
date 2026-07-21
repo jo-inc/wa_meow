@@ -275,6 +275,10 @@ func (m *MockWhatsAppClient) AddEventHandler(handler whatsmeow.EventHandler) uin
 	return 0
 }
 
+func (m *MockWhatsAppClient) RemoveEventHandlers() {
+	m.recordCall("RemoveEventHandlers")
+}
+
 func (m *MockWhatsAppClient) DownloadMediaWithPath(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength int, mediaType whatsmeow.MediaType, mmsType string) ([]byte, error) {
 	m.recordCall("DownloadMediaWithPath", ctx, directPath, encFileHash, fileHash, mediaKey, fileLength, mediaType, mmsType)
 	if m.DownloadError != nil {

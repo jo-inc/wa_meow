@@ -41,6 +41,7 @@ type WhatsAppClient interface {
 
 	// Event handling
 	AddEventHandler(handler whatsmeow.EventHandler) uint32
+	RemoveEventHandlers()
 
 	// Media retry - request phone to re-upload media
 	SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error
@@ -124,6 +125,10 @@ func (w *realClientWrapper) DownloadAndDecrypt(ctx context.Context, url string, 
 
 func (w *realClientWrapper) AddEventHandler(handler whatsmeow.EventHandler) uint32 {
 	return w.client.AddEventHandler(handler)
+}
+
+func (w *realClientWrapper) RemoveEventHandlers() {
+	w.client.RemoveEventHandlers()
 }
 
 func (w *realClientWrapper) SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error {

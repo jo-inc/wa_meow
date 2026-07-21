@@ -35,4 +35,10 @@ primary_region = "sjc"
 [env]
   DATA_DIR = "/data/whatsapp"
   JO_BOT_URL = "https://joprod.fly.dev"
+  # Keep Go's live heap below the 1GB cgroup limit, leaving headroom for
+  # SQLite, TLS/network buffers, stacks, and the runtime itself.
+  GOMEMLIMIT = "700MiB"
+  GOGC = "50"
+  SESSION_UNLOAD_GRACE = "5m"
+  # PPROF_ADDR may be set to 127.0.0.1:<port> for temporary diagnostics.
   # WHATSAPP_SESSION_KEY set via fly secrets

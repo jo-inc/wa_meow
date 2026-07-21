@@ -7,7 +7,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -57,6 +56,7 @@ type SessionManager struct {
 	joBotURL           string
 	joBotInternalToken string
 	encryptKey         []byte
+	unloadGrace        time.Duration
 }
 
 // PendingMediaRetry stores info needed to complete a media retry download
@@ -69,31 +69,42 @@ type PendingMediaRetry struct {
 
 // mediaCacheEntry wraps cached media with a timestamp for TTL eviction
 type mediaCacheEntry struct {
-	data      []byte
-	cachedAt  time.Time
+	data     []byte
+	cachedAt time.Time
 }
 
 const (
-	mediaCacheTTL     = 5 * time.Minute  // Evict entries older than 5 minutes
-	mediaCacheMaxSize = 200 * 1024 * 1024 // 200MB hard cap
-	mediaCacheEvictInterval = 30 * time.Second // How often to run eviction
+	mediaCacheTTL           = 5 * time.Minute
+	mediaCacheMaxSize       = 200 * 1024 * 1024
+	mediaCacheEvictInterval = 30 * time.Second
+	defaultUnloadGrace      = 5 * time.Minute
 )
 
 type UserSession struct {
-	UserID     int
-	Client     WhatsAppClient
-	Container  *sqlstore.Container
-	DBPath     string
-	LastUsed   time.Time
-	QRChannel  chan string
-	LoginDone  chan bool
-	EventChan  chan MessageEvent
-	MediaCache map[string]*mediaCacheEntry // Cache downloaded media by message ID
-	MediaMu    sync.RWMutex
+	UserID         int
+	Client         WhatsAppClient
+	Container      *sqlstore.Container
+	DBPath         string
+	LastUsed       time.Time
+	QRChannel      chan string
+	LoginDone      chan bool
+	EventChan      chan MessageEvent
+	MediaCache     map[string]*mediaCacheEntry // Cache downloaded media by message ID
+	MediaMu        sync.RWMutex
 	mediaCacheSize int64 // Current total bytes in cache
 	// Pending media retries: message ID -> pending retry info
 	PendingRetries   map[string]*PendingMediaRetry
 	PendingRetriesMu sync.RWMutex
+
+	lifecycleMu     sync.Mutex
+	sseListeners    int
+	zeroListenersAt time.Time
+	unloadTimer     *time.Timer
+	closed          bool
+	closeOnce       sync.Once
+	evictCancel     context.CancelFunc
+	evictWG         sync.WaitGroup
+	eventWG         sync.WaitGroup
 }
 
 // mediaCachePut adds an entry to the cache, evicting oldest if over size cap
@@ -104,10 +115,14 @@ func (s *UserSession) mediaCachePut(msgID string, data []byte) {
 	// If this message is already cached, remove old size
 	if existing, ok := s.MediaCache[msgID]; ok {
 		s.mediaCacheSize -= int64(len(existing.data))
+		mediaCacheBytes.Sub(float64(len(existing.data)))
+	} else {
+		mediaCacheEntries.Inc()
 	}
 
 	s.MediaCache[msgID] = &mediaCacheEntry{data: data, cachedAt: time.Now()}
 	s.mediaCacheSize += int64(len(data))
+	mediaCacheBytes.Add(float64(len(data)))
 
 	// If over size cap, evict oldest entries until under
 	for s.mediaCacheSize > mediaCacheMaxSize && len(s.MediaCache) > 0 {
@@ -120,8 +135,12 @@ func (s *UserSession) mediaCachePut(msgID string, data []byte) {
 			}
 		}
 		if oldestID != "" {
-			s.mediaCacheSize -= int64(len(s.MediaCache[oldestID].data))
+			evictedBytes := len(s.MediaCache[oldestID].data)
+			s.mediaCacheSize -= int64(evictedBytes)
 			delete(s.MediaCache, oldestID)
+			mediaCacheEntries.Dec()
+			mediaCacheBytes.Sub(float64(evictedBytes))
+			mediaCacheEvictionsTotal.WithLabelValues("size").Inc()
 			log.Printf("[media/cache] Evicted msg=%s (size cap), cache size now %dMB", piiFingerprint(oldestID), s.mediaCacheSize/(1024*1024))
 		}
 	}
@@ -138,29 +157,46 @@ func (s *UserSession) mediaCacheGet(msgID string) ([]byte, bool) {
 	data := entry.data
 	s.mediaCacheSize -= int64(len(data))
 	delete(s.MediaCache, msgID)
+	mediaCacheEntries.Dec()
+	mediaCacheBytes.Sub(float64(len(data)))
 	return data, true
 }
 
 // startMediaCacheEvictor runs a background goroutine that evicts expired entries
 func (s *UserSession) startMediaCacheEvictor() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.evictCancel = cancel
+	s.evictWG.Add(1)
 	go func() {
+		defer s.evictWG.Done()
 		ticker := time.NewTicker(mediaCacheEvictInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.MediaMu.Lock()
-			now := time.Now()
-			var evicted int
-			for id, entry := range s.MediaCache {
-				if now.Sub(entry.cachedAt) > mediaCacheTTL {
-					s.mediaCacheSize -= int64(len(entry.data))
-					delete(s.MediaCache, id)
-					evicted++
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.MediaMu.Lock()
+				now := time.Now()
+				var evicted int
+				var evictedBytes int64
+				for id, entry := range s.MediaCache {
+					if now.Sub(entry.cachedAt) > mediaCacheTTL {
+						sz := int64(len(entry.data))
+						s.mediaCacheSize -= sz
+						evictedBytes += sz
+						delete(s.MediaCache, id)
+						evicted++
+					}
 				}
+				if evicted > 0 {
+					mediaCacheEntries.Sub(float64(evicted))
+					mediaCacheBytes.Sub(float64(evictedBytes))
+					mediaCacheEvictionsTotal.WithLabelValues("ttl").Add(float64(evicted))
+					log.Printf("[media/cache] TTL eviction: removed %d entries, cache size now %dMB (%d entries)", evicted, s.mediaCacheSize/(1024*1024), len(s.MediaCache))
+				}
+				s.MediaMu.Unlock()
 			}
-			if evicted > 0 {
-				log.Printf("[media/cache] TTL eviction: removed %d entries, cache size now %dMB (%d entries)", evicted, s.mediaCacheSize/(1024*1024), len(s.MediaCache))
-			}
-			s.MediaMu.Unlock()
 		}
 	}()
 }
@@ -242,6 +278,7 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 		joBotURL:           joBotURL,
 		joBotInternalToken: strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
 		encryptKey:         encryptKey,
+		unloadGrace:        configuredUnloadGrace(),
 	}
 }
 
@@ -308,7 +345,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 		return nil
 	}
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backendHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to fetch session from jo_bot backend for user %d: %v", userID, err)
 		return nil
@@ -379,7 +416,7 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backendHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to save session to jo_bot backend for user %d: %v", userID, err)
 		return err
@@ -424,23 +461,8 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	clientLog := waLog.Stdout("Client", "ERROR", true)
 	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
 
-	// Configure a custom HTTP client for media downloads that mimics Baileys:
-	// 1. Remove Referer header (Baileys doesn't send it)
-	// 2. Force HTTP/1.1 to avoid potential HTTP/2 fingerprinting issues
-	// 3. TLSNextProto=empty map disables HTTP/2 negotiation
-	baseTransport := &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		ForceAttemptHTTP2: false,
-		TLSNextProto:      map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
-		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
-	}
-	customTransport := &baileysTransport{
-		base: baseTransport,
-	}
-	rawClient.SetMediaHTTPClient(&http.Client{
-		Transport: customTransport,
-		Timeout:   60 * time.Second,
-	})
+	// Share the media transport and connection pool across all sessions.
+	rawClient.SetMediaHTTPClient(sharedMediaHTTPClient)
 
 	client := newRealClientWrapper(rawClient)
 
@@ -460,11 +482,17 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	session.startMediaCacheEvictor()
 
 	rawClient.AddEventHandler(func(evt interface{}) {
+		if !session.beginEvent() {
+			return
+		}
+		defer session.eventWG.Done()
 		session.handleEvent(evt)
 	})
 
 	m.sessions[userID] = session
 	activeSessions.Inc()
+	sessionLifecycleTotal.WithLabelValues("created").Inc()
+	m.scheduleUnloadLocked(session)
 	return session, nil
 }
 
@@ -480,25 +508,38 @@ func (m *SessionManager) GetSession(userID int) *UserSession {
 
 func (m *SessionManager) RemoveSession(userID int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if session, ok := m.sessions[userID]; ok {
-		// Logout invalidates the WA session server-side so re-connect requires fresh QR
-		if session.Client.IsLoggedIn() {
-			if err := session.Client.Logout(); err != nil {
-				log.Printf("⚠️ Logout failed during session removal: %v (continuing with disconnect)", err)
-			}
-		} else {
-			session.Client.Disconnect()
-		}
-		// Delete the local session DB so GetOrCreateSession starts fresh
-		if session.DBPath != "" {
-			if err := os.Remove(session.DBPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("⚠️ Failed to delete session DB: %v", err)
-			}
-		}
+	session, ok := m.sessions[userID]
+	if ok {
 		delete(m.sessions, userID)
-		activeSessions.Dec()
+		session.lifecycleMu.Lock()
+		session.closed = true
+		if session.unloadTimer != nil {
+			session.unloadTimer.Stop()
+		}
+		listeners := session.sseListeners
+		session.sseListeners = 0
+		session.lifecycleMu.Unlock()
+		if listeners > 0 {
+			activeSSEListeners.Sub(float64(listeners))
+		}
 	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// Explicit deletion invalidates the linked device and deletes local state.
+	// Automatic idle unload deliberately does neither.
+	session.close(true)
+	if session.DBPath != "" {
+		for _, path := range []string{session.DBPath, session.DBPath + "-wal", session.DBPath + "-shm"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				log.Printf("Failed to delete session database user=%d: %v", userID, err)
+			}
+		}
+	}
+	activeSessions.Dec()
+	sessionLifecycleTotal.WithLabelValues("deleted").Inc()
 }
 
 func (m *SessionManager) SaveSession(userID int) {
@@ -878,6 +919,11 @@ func jsonResponse(w http.ResponseWriter, data interface{}) {
 }
 
 func errorResponse(w http.ResponseWriter, status int, message string) {
+	if status >= http.StatusInternalServerError {
+		reference := fmt.Sprintf("%x", time.Now().UnixNano())
+		log.Printf("Internal request error reference=%s: %s", reference, message)
+		message = "internal server error (reference: " + reference + ")"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
@@ -984,11 +1030,12 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(userID)
-	if session == nil {
+	session, ok := manager.acquireSSEListener(userID)
+	if !ok {
 		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
+	defer manager.releaseSSEListener(session)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1311,11 +1358,12 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(userID)
-	if session == nil {
+	session, ok := manager.acquireSSEListener(userID)
+	if !ok {
 		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
+	defer manager.releaseSSEListener(session)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1943,6 +1991,7 @@ func main() {
 	encryptKey := os.Getenv("WHATSAPP_SESSION_KEY")
 
 	manager = NewSessionManager(dataDir, joBotURL, encryptKey)
+	startPprofServer()
 
 	http.HandleFunc("/health", instrumentHandler("health", healthHandler))
 	http.Handle("/metrics", metricsHandler())

@@ -56,6 +56,31 @@ var (
 		Name: "jo_whatsapp_session_reconnects_total",
 		Help: "Total WA session reconnection events",
 	})
+
+	sessionLifecycleTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "jo_whatsapp_session_lifecycle_total",
+		Help: "WhatsApp session lifecycle transitions",
+	}, []string{"transition"})
+
+	activeSSEListeners = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "jo_whatsapp_sse_listeners",
+		Help: "Current active SSE listeners across all sessions",
+	})
+
+	mediaCacheEntries = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "jo_whatsapp_media_cache_entries",
+		Help: "Current entries across all session media caches",
+	})
+
+	mediaCacheBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "jo_whatsapp_media_cache_bytes",
+		Help: "Current bytes across all session media caches",
+	})
+
+	mediaCacheEvictionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "jo_whatsapp_media_cache_evictions_total",
+		Help: "Media cache evictions by reason",
+	}, []string{"reason"})
 )
 
 func metricsHandler() http.Handler {
