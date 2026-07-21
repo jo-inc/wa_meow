@@ -40,13 +40,14 @@ type baileysTransport struct {
 }
 
 func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Remove Referer header (Baileys doesn't send it)
-	req.Header.Del("Referer")
-	// Remove User-Agent (Baileys doesn't send it for media downloads)
-	req.Header.Del("User-Agent")
-	// Log what we're actually sending
-	log.Printf("[media/http] Request: %s, Headers: Origin=%s", req.URL.Host, req.Header.Get("Origin"))
-	return t.base.RoundTrip(req)
+	// RoundTrippers must not mutate the caller's request. Clone both the request
+	// and headers before applying the WhatsApp Web media fingerprint.
+	mediaReq := req.Clone(req.Context())
+	mediaReq.Header = req.Header.Clone()
+	mediaReq.Header.Del("Referer")
+	mediaReq.Header.Del("User-Agent")
+	log.Printf("[media/http] Request: %s, Headers: Origin=%s", mediaReq.URL.Host, mediaReq.Header.Get("Origin"))
+	return t.base.RoundTrip(mediaReq)
 }
 
 type SessionManager struct {
@@ -438,6 +439,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	if session, ok := m.sessions[userID]; ok {
 		session.LastUsed = time.Now()
+		m.scheduleUnloadLocked(session)
 		return session, nil
 	}
 
@@ -455,6 +457,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
+		_ = container.Close()
 		return nil, fmt.Errorf("failed to get device: %w", err)
 	}
 
@@ -497,10 +500,13 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 }
 
 func (m *SessionManager) GetSession(userID int) *UserSession {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if session, ok := m.sessions[userID]; ok {
 		session.LastUsed = time.Now()
+		// Short non-SSE operations (send, typing, media, status) also count as
+		// activity. Refresh the grace timer so teardown cannot race normal work.
+		m.scheduleUnloadLocked(session)
 		return session
 	}
 	return nil

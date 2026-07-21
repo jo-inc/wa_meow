@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +31,75 @@ func TestIdleSessionUnloadDoesNotLogout(t *testing.T) {
 	if len(client.GetCallsByMethod("RemoveEventHandlers")) == 0 {
 		t.Fatal("idle unload must remove event handlers")
 	}
+}
+
+func TestSessionActivityRefreshesUnloadGrace(t *testing.T) {
+	m := setupTestManager(t)
+	m.unloadGrace = 30 * time.Millisecond
+	client := NewLoggedInMockClient()
+	session := injectMockSession(m, 9005, client)
+	m.mu.Lock()
+	m.scheduleUnloadLocked(session)
+	m.mu.Unlock()
+
+	time.Sleep(20 * time.Millisecond)
+	if got := m.GetSession(9005); got == nil {
+		t.Fatal("expected activity before the original deadline")
+	}
+	time.Sleep(20 * time.Millisecond)
+	m.mu.RLock()
+	_, stillLoaded := m.sessions[9005]
+	m.mu.RUnlock()
+	if !stillLoaded {
+		t.Fatal("session activity did not refresh the unload grace period")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	m.mu.RLock()
+	_, stillLoaded = m.sessions[9005]
+	m.mu.RUnlock()
+	if stillLoaded {
+		t.Fatal("session remained loaded after refreshed grace period elapsed")
+	}
+}
+
+func TestBaileysTransportDoesNotMutateCallerRequest(t *testing.T) {
+	var forwarded *http.Request
+	transport := &baileysTransport{base: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		forwarded = req
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	req, err := http.NewRequest(http.MethodGet, "https://example.invalid/media", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Referer", "https://web.whatsapp.com/")
+	req.Header.Set("User-Agent", "test-agent")
+	req.Header.Set("Origin", "https://web.whatsapp.com")
+
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("Referer") == "" || req.Header.Get("User-Agent") == "" {
+		t.Fatal("transport mutated the caller request")
+	}
+	if forwarded == req {
+		t.Fatal("transport forwarded the caller request without cloning")
+	}
+	if forwarded.Header.Get("Referer") != "" || forwarded.Header.Get("User-Agent") != "" {
+		t.Fatal("transport did not remove browser-identifying headers")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestActiveSSEListenerPreventsUnload(t *testing.T) {
