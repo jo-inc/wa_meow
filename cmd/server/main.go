@@ -75,24 +75,39 @@ type mediaCacheEntry struct {
 }
 
 const (
-	mediaCacheTTL           = 5 * time.Minute
-	mediaCacheMaxSize       = 200 * 1024 * 1024
-	mediaCacheEvictInterval = 30 * time.Second
-	defaultUnloadGrace      = 5 * time.Minute
+	mediaCacheTTL            = 5 * time.Minute
+	mediaCacheGlobalMaxBytes = 100 * 1024 * 1024
+	mediaCacheMaxEntryBytes  = 25 * 1024 * 1024
+	mediaCacheEvictInterval  = 30 * time.Second
+	defaultUnloadGrace       = 5 * time.Minute
 )
 
+// mediaCacheBudget is shared by every session in the process. Its mutex is the
+// reservation boundary: bytes can never be committed above limit, even when
+// different sessions insert concurrently.
+type mediaCacheBudget struct {
+	mu      sync.Mutex
+	limit   int64
+	bytes   int64
+	entries int64
+}
+
+var processMediaCacheBudget = &mediaCacheBudget{limit: mediaCacheGlobalMaxBytes}
+
 type UserSession struct {
-	UserID         int
-	Client         WhatsAppClient
-	Container      *sqlstore.Container
-	DBPath         string
-	LastUsed       time.Time
-	QRChannel      chan string
-	LoginDone      chan bool
-	EventChan      chan MessageEvent
-	MediaCache     map[string]*mediaCacheEntry // Cache downloaded media by message ID
-	MediaMu        sync.RWMutex
-	mediaCacheSize int64 // Current total bytes in cache
+	UserID           int
+	Client           WhatsAppClient
+	Container        *sqlstore.Container
+	DBPath           string
+	LastUsed         time.Time
+	QRChannel        chan string
+	LoginDone        chan bool
+	EventChan        chan MessageEvent
+	MediaCache       map[string]*mediaCacheEntry // Cache downloaded media by message ID
+	MediaMu          sync.RWMutex
+	mediaCacheSize   int64 // Current total bytes in this session's cache
+	mediaCacheBudget *mediaCacheBudget
+	mediaCacheClosed bool
 	// Pending media retries: message ID -> pending retry info
 	PendingRetries   map[string]*PendingMediaRetry
 	PendingRetriesMu sync.RWMutex
@@ -108,59 +123,111 @@ type UserSession struct {
 	eventWG         sync.WaitGroup
 }
 
-// mediaCachePut adds an entry to the cache, evicting oldest if over size cap
-func (s *UserSession) mediaCachePut(msgID string, data []byte) {
-	s.MediaMu.Lock()
-	defer s.MediaMu.Unlock()
+func (s *UserSession) cacheBudget() *mediaCacheBudget {
+	if s.mediaCacheBudget != nil {
+		return s.mediaCacheBudget
+	}
+	return processMediaCacheBudget
+}
 
-	// If this message is already cached, remove old size
-	if existing, ok := s.MediaCache[msgID]; ok {
-		s.mediaCacheSize -= int64(len(existing.data))
-		mediaCacheBytes.Sub(float64(len(existing.data)))
-	} else {
-		mediaCacheEntries.Inc()
+// Cache lock order is always process budget -> session MediaMu. No cache path
+// may acquire these in the opposite order. Holding both locks makes reservation,
+// map mutation, accounting, and Prometheus updates one atomic operation.
+func (s *UserSession) lockMediaCache() *mediaCacheBudget {
+	budget := s.cacheBudget()
+	budget.mu.Lock()
+	s.MediaMu.Lock()
+	return budget
+}
+
+func (s *UserSession) unlockMediaCache(budget *mediaCacheBudget) {
+	s.MediaMu.Unlock()
+	budget.mu.Unlock()
+}
+
+// mediaCachePut adds an entry only if it fits the process-wide hard budget.
+// Rejected data is not retained; callers can still use the direct download path.
+func (s *UserSession) mediaCachePut(msgID string, data []byte) bool {
+	size := int64(len(data))
+	if size == 0 || size > mediaCacheMaxEntryBytes {
+		mediaCacheEvictionsTotal.WithLabelValues("entry_too_large").Inc()
+		return false
+	}
+
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
+	if s.mediaCacheClosed {
+		mediaCacheEvictionsTotal.WithLabelValues("session_closed").Inc()
+		return false
+	}
+	if s.MediaCache == nil {
+		s.MediaCache = make(map[string]*mediaCacheEntry)
+	}
+
+	existing, replacing := s.MediaCache[msgID]
+	oldSize := int64(0)
+	if replacing {
+		oldSize = int64(len(existing.data))
+	}
+	newBudgetBytes := budget.bytes - oldSize + size
+	if newBudgetBytes > budget.limit {
+		mediaCacheEvictionsTotal.WithLabelValues("budget").Inc()
+		return false
 	}
 
 	s.MediaCache[msgID] = &mediaCacheEntry{data: data, cachedAt: time.Now()}
-	s.mediaCacheSize += int64(len(data))
-	mediaCacheBytes.Add(float64(len(data)))
-
-	// If over size cap, evict oldest entries until under
-	for s.mediaCacheSize > mediaCacheMaxSize && len(s.MediaCache) > 0 {
-		var oldestID string
-		var oldestTime time.Time
-		for id, entry := range s.MediaCache {
-			if oldestID == "" || entry.cachedAt.Before(oldestTime) {
-				oldestID = id
-				oldestTime = entry.cachedAt
-			}
-		}
-		if oldestID != "" {
-			evictedBytes := len(s.MediaCache[oldestID].data)
-			s.mediaCacheSize -= int64(evictedBytes)
-			delete(s.MediaCache, oldestID)
-			mediaCacheEntries.Dec()
-			mediaCacheBytes.Sub(float64(evictedBytes))
-			mediaCacheEvictionsTotal.WithLabelValues("size").Inc()
-			log.Printf("[media/cache] Evicted msg=%s (size cap), cache size now %dMB", piiFingerprint(oldestID), s.mediaCacheSize/(1024*1024))
-		}
+	s.mediaCacheSize += size - oldSize
+	budget.bytes = newBudgetBytes
+	mediaCacheBytes.Add(float64(size - oldSize))
+	if !replacing {
+		budget.entries++
+		mediaCacheEntries.Inc()
 	}
+	return true
 }
 
-// mediaCacheGet retrieves and removes an entry from the cache (consume-once)
+// mediaCacheGet retrieves and removes an entry from the cache (consume-once).
 func (s *UserSession) mediaCacheGet(msgID string) ([]byte, bool) {
-	s.MediaMu.Lock()
-	defer s.MediaMu.Unlock()
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
 	entry, ok := s.MediaCache[msgID]
 	if !ok {
 		return nil, false
 	}
 	data := entry.data
-	s.mediaCacheSize -= int64(len(data))
+	sz := int64(len(data))
+	s.mediaCacheSize -= sz
+	budget.bytes -= sz
+	budget.entries--
 	delete(s.MediaCache, msgID)
 	mediaCacheEntries.Dec()
-	mediaCacheBytes.Sub(float64(len(data)))
+	mediaCacheBytes.Sub(float64(sz))
 	return data, true
+}
+
+func (s *UserSession) mediaCacheEvictExpired(now time.Time) int {
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
+	var evicted int
+	var evictedBytes int64
+	for id, entry := range s.MediaCache {
+		if now.Sub(entry.cachedAt) > mediaCacheTTL {
+			sz := int64(len(entry.data))
+			s.mediaCacheSize -= sz
+			budget.bytes -= sz
+			budget.entries--
+			evictedBytes += sz
+			delete(s.MediaCache, id)
+			evicted++
+		}
+	}
+	if evicted > 0 {
+		mediaCacheEntries.Sub(float64(evicted))
+		mediaCacheBytes.Sub(float64(evictedBytes))
+		mediaCacheEvictionsTotal.WithLabelValues("ttl").Add(float64(evicted))
+		log.Printf("[media/cache] TTL eviction: removed %d entries, process cache now %dMB (%d entries)", evicted, budget.bytes/(1024*1024), budget.entries)
+	}
+	return evicted
 }
 
 // startMediaCacheEvictor runs a background goroutine that evicts expired entries
@@ -177,26 +244,7 @@ func (s *UserSession) startMediaCacheEvictor() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.MediaMu.Lock()
-				now := time.Now()
-				var evicted int
-				var evictedBytes int64
-				for id, entry := range s.MediaCache {
-					if now.Sub(entry.cachedAt) > mediaCacheTTL {
-						sz := int64(len(entry.data))
-						s.mediaCacheSize -= sz
-						evictedBytes += sz
-						delete(s.MediaCache, id)
-						evicted++
-					}
-				}
-				if evicted > 0 {
-					mediaCacheEntries.Sub(float64(evicted))
-					mediaCacheBytes.Sub(float64(evictedBytes))
-					mediaCacheEvictionsTotal.WithLabelValues("ttl").Add(float64(evicted))
-					log.Printf("[media/cache] TTL eviction: removed %d entries, cache size now %dMB (%d entries)", evicted, s.mediaCacheSize/(1024*1024), len(s.MediaCache))
-				}
-				s.MediaMu.Unlock()
+				s.mediaCacheEvictExpired(time.Now())
 			}
 		}
 	}()
@@ -609,8 +657,11 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					log.Printf("[media/cache] Failed to download image msg=%s: %v", piiFingerprint(msgID), err)
 					return
 				}
-				s.mediaCachePut(msgID, data)
-				log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
+				if s.mediaCachePut(msgID, data) {
+					log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
+				} else {
+					log.Printf("[media/cache] Skipped image msg=%s: %d bytes (cache limit)", piiFingerprint(msgID), len(data))
+				}
 			}(v.Info.ID, img)
 
 			hasContent = true
@@ -700,8 +751,11 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				}
 
 				if len(data) > 0 {
-					s.mediaCachePut(msgID, data)
-					log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					if s.mediaCachePut(msgID, data) {
+						log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					} else {
+						log.Printf("[media/cache] Skipped audio msg=%s: %d bytes (cache limit, ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					}
 					return
 				}
 
@@ -914,9 +968,13 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 		return
 	}
 
-	// Cache the downloaded media
-	s.mediaCachePut(msgID, data)
-	log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
+	// Cache the downloaded media. If the hard budget is full, the normal media
+	// endpoint can still perform its direct fallback download.
+	if s.mediaCachePut(msgID, data) {
+		log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
+	} else {
+		log.Printf("[media/retry] Skipped audio msg=%s: %d bytes (cache limit)", piiFingerprint(msgID), len(data))
+	}
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {

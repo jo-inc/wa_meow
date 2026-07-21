@@ -166,16 +166,20 @@ func (s *UserSession) close(logout bool) {
 			}
 		}
 
-		s.MediaMu.Lock()
-		entries, bytes := len(s.MediaCache), s.mediaCacheSize
+		// Cache lock order is budget -> MediaMu; see lockMediaCache.
+		budget := s.lockMediaCache()
+		entries, bytes := int64(len(s.MediaCache)), s.mediaCacheSize
 		clear(s.MediaCache)
 		s.mediaCacheSize = 0
-		s.MediaMu.Unlock()
+		s.mediaCacheClosed = true
+		budget.entries -= entries
+		budget.bytes -= bytes
 		if entries > 0 {
 			mediaCacheEntries.Sub(float64(entries))
 			mediaCacheBytes.Sub(float64(bytes))
 			mediaCacheEvictionsTotal.WithLabelValues("session_close").Add(float64(entries))
 		}
+		s.unlockMediaCache(budget)
 		s.PendingRetriesMu.Lock()
 		clear(s.PendingRetries)
 		s.PendingRetriesMu.Unlock()
