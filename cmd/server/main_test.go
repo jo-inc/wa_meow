@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 // Test helper: create a session manager with a mock client injected
@@ -1029,312 +1031,6 @@ func TestSendLocationHandler(t *testing.T) {
 
 // ==================== Chat Handler Tests ====================
 
-func TestGetChatsHandler(t *testing.T) {
-	t.Run("requires user_id parameter", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/chats", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 404 for unknown session", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/chats?user_id=99999", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 400 when not logged in", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewConnectedMockClient()
-		injectMockSession(manager, 1100, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/chats?user_id=1100", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns chats successfully", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.JoinedGroups = []*types.GroupInfo{
-			{JID: types.JID{User: "group1", Server: types.GroupServer}, GroupName: types.GroupName{Name: "Test Group"}},
-		}
-		mock.SetContacts(map[types.JID]types.ContactInfo{
-			{User: "123", Server: types.DefaultUserServer}: {PushName: "John Doe"},
-		})
-		injectMockSession(manager, 1101, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/chats?user_id=1101", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-
-		var chats []ChatPayload
-		json.NewDecoder(w.Body).Decode(&chats)
-		if len(chats) != 2 {
-			t.Errorf("expected 2 chats (1 group + 1 contact), got %d", len(chats))
-		}
-	})
-
-	t.Run("returns contacts with fallback names", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		// No groups
-		mock.JoinedGroups = nil
-		// Contact with FullName but no PushName
-		mock.SetContacts(map[types.JID]types.ContactInfo{
-			{User: "456", Server: types.DefaultUserServer}: {FullName: "Jane Smith"},
-			{User: "789", Server: types.DefaultUserServer}: {}, // No name at all
-		})
-		injectMockSession(manager, 1102, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/chats?user_id=1102", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-
-		var chats []ChatPayload
-		json.NewDecoder(w.Body).Decode(&chats)
-		if len(chats) != 2 {
-			t.Errorf("expected 2 chats, got %d", len(chats))
-		}
-	})
-
-	t.Run("handles groups and contacts errors gracefully", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.JoinedGroupsError = errors.New("groups failed")
-		mock.store.Contacts.ContactsError = errors.New("contacts failed")
-		injectMockSession(manager, 1103, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/chats?user_id=1103", nil)
-		w := httptest.NewRecorder()
-		getChatsHandler(w, req)
-
-		// Should still return 200, just empty chats
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-
-		var chats []ChatPayload
-		json.NewDecoder(w.Body).Decode(&chats)
-		if chats == nil {
-			chats = []ChatPayload{}
-		}
-		// Should return empty or nil chats when both fail
-	})
-}
-
-// ==================== Group Handler Tests ====================
-
-func TestGetGroupInfoHandler(t *testing.T) {
-	t.Run("requires user_id parameter", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/info", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("requires group_jid parameter", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/info?user_id=1", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 404 for unknown session", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/info?user_id=99999&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 400 when not logged in", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewConnectedMockClient()
-		injectMockSession(manager, 1199, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/info?user_id=1199&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns group info successfully", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.GroupInfo = &types.GroupInfo{
-			JID:        types.JID{User: "group123", Server: types.GroupServer},
-			GroupName:  types.GroupName{Name: "My Group"},
-			GroupTopic: types.GroupTopic{Topic: "Group topic"},
-			OwnerJID:   types.JID{User: "owner", Server: types.DefaultUserServer},
-			Participants: []types.GroupParticipant{
-				{JID: types.JID{User: "user1", Server: types.DefaultUserServer}, IsAdmin: true},
-				{JID: types.JID{User: "user2", Server: types.DefaultUserServer}, IsAdmin: false},
-			},
-		}
-		injectMockSession(manager, 1200, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/info?user_id=1200&group_jid=group123@g.us", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-
-		var info GroupInfoPayload
-		json.NewDecoder(w.Body).Decode(&info)
-		if info.Name != "My Group" {
-			t.Errorf("expected name 'My Group', got %q", info.Name)
-		}
-		if len(info.Participants) != 2 {
-			t.Errorf("expected 2 participants, got %d", len(info.Participants))
-		}
-	})
-
-	t.Run("handles GetGroupInfo error", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.GroupInfoError = errors.New("group not found")
-		injectMockSession(manager, 1201, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/info?user_id=1201&group_jid=group123@g.us", nil)
-		w := httptest.NewRecorder()
-		getGroupInfoHandler(w, req)
-
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500, got %d", w.Code)
-		}
-	})
-}
-
-func TestListGroupParticipantsHandler(t *testing.T) {
-	t.Run("requires user_id parameter", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("requires group_jid parameter", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants?user_id=1", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 404 for unknown session", func(t *testing.T) {
-		manager = setupTestManager(t)
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants?user_id=99999&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns 400 when not logged in", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewConnectedMockClient()
-		injectMockSession(manager, 1300, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants?user_id=1300&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
-		}
-	})
-
-	t.Run("returns participants successfully", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.GroupInfo = &types.GroupInfo{
-			Participants: []types.GroupParticipant{
-				{JID: types.JID{User: "admin", Server: types.DefaultUserServer}, IsAdmin: true, IsSuperAdmin: true},
-				{JID: types.JID{User: "member", Server: types.DefaultUserServer}, IsAdmin: false},
-			},
-		}
-		injectMockSession(manager, 1301, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants?user_id=1301&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-
-		var participants []ParticipantInfo
-		json.NewDecoder(w.Body).Decode(&participants)
-		if len(participants) != 2 {
-			t.Errorf("expected 2 participants, got %d", len(participants))
-		}
-	})
-
-	t.Run("handles GetGroupInfo error", func(t *testing.T) {
-		manager = setupTestManager(t)
-		mock := NewLoggedInMockClient()
-		mock.GroupInfoError = errors.New("group not found")
-		injectMockSession(manager, 1302, mock)
-
-		req := httptest.NewRequest(http.MethodGet, "/groups/participants?user_id=1302&group_jid=group@g.us", nil)
-		w := httptest.NewRecorder()
-		listGroupParticipantsHandler(w, req)
-
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500, got %d", w.Code)
-		}
-	})
-}
-
-// ==================== Media Handler Tests ====================
-
 func TestDownloadMediaHandler(t *testing.T) {
 	t.Run("rejects non-POST methods", func(t *testing.T) {
 		manager = setupTestManager(t)
@@ -1839,4 +1535,177 @@ func TestMockClient(t *testing.T) {
 			t.Errorf("expected 1 Connect call, got %d", len(connectCalls))
 		}
 	})
+}
+
+func TestConfigureDirectChatClient(t *testing.T) {
+	client := &whatsmeow.Client{DisableManualHistorySyncReceipt: true}
+
+	configureDirectChatClient(client)
+
+	if !client.ManualHistorySyncDownload {
+		t.Fatal("expected automatic history downloads to be disabled")
+	}
+	if client.DisableManualHistorySyncReceipt {
+		t.Fatal("expected history receipts to remain enabled")
+	}
+}
+
+func TestIsDirectChatJID(t *testing.T) {
+	tests := []struct {
+		name    string
+		jid     types.JID
+		allowed bool
+	}{
+		{name: "standard user", jid: types.JID{User: "15550000001", Server: types.DefaultUserServer}, allowed: true},
+		{name: "hidden user", jid: types.JID{User: "15550000002", Server: types.HiddenUserServer}, allowed: true},
+		{name: "legacy user", jid: types.JID{User: "15550000003", Server: types.LegacyUserServer}, allowed: true},
+		{name: "group", jid: types.JID{User: "100000", Server: types.GroupServer}},
+		{name: "broadcast", jid: types.JID{User: "status", Server: types.BroadcastServer}},
+		{name: "newsletter", jid: types.JID{User: "100000", Server: types.NewsletterServer}},
+		{name: "bot", jid: types.JID{User: "100000", Server: types.BotServer}},
+		{name: "messenger", jid: types.JID{User: "100000", Server: types.MessengerServer}},
+		{name: "interop", jid: types.JID{User: "100000", Server: types.InteropServer}},
+		{name: "hosted", jid: types.JID{User: "100000", Server: types.HostedServer}},
+		{name: "hosted lid", jid: types.JID{User: "100000", Server: types.HostedLIDServer}},
+		{name: "empty user", jid: types.JID{Server: types.DefaultUserServer}},
+		{name: "device address", jid: types.JID{User: "15550000004", Server: types.DefaultUserServer, Device: 1}},
+		{name: "agent address", jid: types.JID{User: "15550000005", Server: types.DefaultUserServer, RawAgent: 1}},
+		{name: "integrator address", jid: types.JID{User: "15550000006", Server: types.DefaultUserServer, Integrator: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDirectChatJID(tt.jid); got != tt.allowed {
+				t.Fatalf("isDirectChatJID() = %v, want %v", got, tt.allowed)
+			}
+		})
+	}
+}
+
+func TestParseDirectChatJID(t *testing.T) {
+	for _, raw := range []string{
+		"15550000001@s.whatsapp.net",
+		"15550000002@lid",
+		"15550000003@c.us",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseDirectChatJID(raw); err != nil {
+				t.Fatalf("expected direct JID to pass: %v", err)
+			}
+		})
+	}
+
+	for _, raw := range []string{
+		"not-a-jid",
+		"100000@g.us",
+		"status@broadcast",
+		"100000@newsletter",
+		"100000@bot",
+		"100000@hosted",
+		"100000@hosted.lid",
+		"100000@interop",
+		"100000@msgr",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseDirectChatJID(raw); err == nil {
+				t.Fatal("expected non-direct JID to be rejected")
+			}
+		})
+	}
+}
+
+func TestRegisterHandlersDirectChatSurface(t *testing.T) {
+	mux := http.NewServeMux()
+	registerHandlers(mux)
+
+	for _, path := range []string{"/chats", "/groups/info", "/groups/participants"} {
+		t.Run("disabled_"+strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "_"), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("%s returned %d, want 404", path, w.Code)
+			}
+		})
+	}
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("health returned %d, want 200", w.Code)
+	}
+}
+
+func TestHandleEventDropsNonDirectChats(t *testing.T) {
+	for _, server := range []string{
+		types.GroupServer,
+		types.BroadcastServer,
+		types.NewsletterServer,
+		types.BotServer,
+		types.MessengerServer,
+		types.InteropServer,
+		types.HostedServer,
+		types.HostedLIDServer,
+	} {
+		t.Run(server, func(t *testing.T) {
+			client := NewLoggedInMockClient()
+			session := &UserSession{
+				Client:    client,
+				EventChan: make(chan MessageEvent, 1),
+			}
+			session.handleEvent(&events.Message{
+				Info: types.MessageInfo{MessageSource: types.MessageSource{
+					Chat:   types.JID{User: "100000", Server: server},
+					Sender: types.JID{User: "15550000001", Server: types.DefaultUserServer},
+				}},
+				Message: &waE2E.Message{Conversation: proto.String("ignored")},
+			})
+
+			select {
+			case <-session.EventChan:
+				t.Fatal("non-direct message was published")
+			default:
+			}
+			if len(client.GetCallsByMethod("Download")) != 0 {
+				t.Fatal("non-direct message triggered media work")
+			}
+		})
+	}
+}
+
+func TestOutboundHandlersRejectNonDirectChats(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		body    string
+	}{
+		{name: "text", handler: sendMessageHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","text":"hello"}`},
+		{name: "reaction", handler: sendReactionHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","message_id":"msg-1","emoji":"x"}`},
+		{name: "typing", handler: setTypingHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","typing":true}`},
+		{name: "image", handler: sendImageHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","image_b64":"aGVsbG8=","mime_type":"image/png"}`},
+		{name: "audio", handler: sendAudioHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","audio_b64":"aGVsbG8=","mime_type":"audio/ogg","ptt":true}`},
+		{name: "document", handler: sendDocumentHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","doc_b64":"aGVsbG8=","mime_type":"text/plain","filename":"test.txt"}`},
+		{name: "location", handler: sendLocationHandler, body: `{"user_id":9001,"chat_jid":"100000@g.us","latitude":1,"longitude":2}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := setupTestManager(t)
+			client := NewLoggedInMockClient()
+			injectMockSession(m, 9001, client)
+			previousManager := manager
+			manager = m
+			t.Cleanup(func() { manager = previousManager })
+
+			w := httptest.NewRecorder()
+			tt.handler(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body)))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("returned %d, want 400: %s", w.Code, w.Body.String())
+			}
+			for _, method := range []string{"SendMessage", "SendChatPresence", "Upload"} {
+				if calls := client.GetCallsByMethod(method); len(calls) != 0 {
+					t.Fatalf("non-direct request called %s", method)
+				}
+			}
+		})
+	}
 }

@@ -283,12 +283,6 @@ type MessagePayload struct {
 	IsPTT         bool   `json:"is_ptt,omitempty"` // Push-to-talk (voice note) - critical for download
 }
 
-type ChatPayload struct {
-	JID     string `json:"jid"`
-	Name    string `json:"name"`
-	IsGroup bool   `json:"is_group"`
-}
-
 func piiFingerprint(value string) string {
 	if value == "" {
 		return "none"
@@ -511,6 +505,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
 	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
+	configureDirectChatClient(rawClient)
 
 	// Share the media transport and connection pool across all sessions.
 	rawClient.SetMediaHTTPClient(sharedMediaHTTPClient)
@@ -607,6 +602,9 @@ func (m *SessionManager) SaveSession(userID int) {
 func (s *UserSession) handleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
+		if !isDirectChatJID(v.Info.Chat) {
+			return
+		}
 		eventStart := time.Now()
 		payload := MessagePayload{
 			ID:         v.Info.ID,
@@ -895,6 +893,9 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		}
 
 	case *events.MediaRetry:
+		if !isDirectChatJID(v.ChatID) {
+			return
+		}
 		// Handle MediaRetry response from phone after SendMediaRetryReceipt
 		// This contains a new DirectPath for downloading media that was re-uploaded
 		s.handleMediaRetry(v)
@@ -1181,60 +1182,6 @@ func deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "disconnected"})
 }
 
-func getChatsHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	ctx := context.Background()
-	var chats []ChatPayload
-
-	groups, err := session.Client.GetJoinedGroups(ctx)
-	if err == nil {
-		for _, group := range groups {
-			chats = append(chats, ChatPayload{
-				JID:     group.JID.String(),
-				Name:    group.Name,
-				IsGroup: true,
-			})
-		}
-	}
-
-	contacts, err := session.Client.GetStore().GetContacts().GetAllContacts(ctx)
-	if err == nil {
-		for jid, contact := range contacts {
-			name := contact.PushName
-			if name == "" {
-				name = contact.FullName
-			}
-			if name == "" {
-				name = jid.User
-			}
-			chats = append(chats, ChatPayload{
-				JID:     jid.String(),
-				Name:    name,
-				IsGroup: false,
-			})
-		}
-	}
-
-	jsonResponse(w, chats)
-}
-
 func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1263,7 +1210,7 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1331,7 +1278,7 @@ func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1392,7 +1339,7 @@ func setTypingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1498,7 +1445,7 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1577,7 +1524,7 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1667,7 +1614,7 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1744,7 +1691,7 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1772,132 +1719,6 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
 	})
-}
-
-type GroupInfoPayload struct {
-	JID          string            `json:"jid"`
-	Name         string            `json:"name"`
-	Topic        string            `json:"topic"`
-	Created      int64             `json:"created"`
-	CreatorJID   string            `json:"creator_jid"`
-	Participants []ParticipantInfo `json:"participants"`
-	IsAnnounce   bool              `json:"is_announce"`
-	IsLocked     bool              `json:"is_locked"`
-}
-
-type ParticipantInfo struct {
-	JID          string `json:"jid"`
-	IsAdmin      bool   `json:"is_admin"`
-	IsSuperAdmin bool   `json:"is_super_admin"`
-}
-
-func getGroupInfoHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	groupJID := r.URL.Query().Get("group_jid")
-	if groupJID == "" {
-		errorResponse(w, http.StatusBadRequest, "group_jid required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(groupJID)
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid jid")
-		return
-	}
-
-	info, err := session.Client.GetGroupInfo(context.Background(), jid)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
-		return
-	}
-
-	participants := make([]ParticipantInfo, 0, len(info.Participants))
-	for _, p := range info.Participants {
-		participants = append(participants, ParticipantInfo{
-			JID:          p.JID.String(),
-			IsAdmin:      p.IsAdmin,
-			IsSuperAdmin: p.IsSuperAdmin,
-		})
-	}
-
-	payload := GroupInfoPayload{
-		JID:          info.JID.String(),
-		Name:         info.Name,
-		Topic:        info.Topic,
-		Created:      info.GroupCreated.Unix(),
-		CreatorJID:   info.OwnerJID.String(),
-		Participants: participants,
-		IsAnnounce:   info.IsAnnounce,
-		IsLocked:     info.IsLocked,
-	}
-
-	jsonResponse(w, payload)
-}
-
-func listGroupParticipantsHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	groupJID := r.URL.Query().Get("group_jid")
-	if groupJID == "" {
-		errorResponse(w, http.StatusBadRequest, "group_jid required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(groupJID)
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid jid")
-		return
-	}
-
-	info, err := session.Client.GetGroupInfo(context.Background(), jid)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
-		return
-	}
-
-	participants := make([]ParticipantInfo, 0, len(info.Participants))
-	for _, p := range info.Participants {
-		participants = append(participants, ParticipantInfo{
-			JID:          p.JID.String(),
-			IsAdmin:      p.IsAdmin,
-			IsSuperAdmin: p.IsSuperAdmin,
-		})
-	}
-
-	jsonResponse(w, participants)
 }
 
 func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
@@ -2029,6 +1850,55 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func configureDirectChatClient(client *whatsmeow.Client) {
+	// Live 1:1 delivery does not require downloading and parsing historical chats.
+	// Keep receipts enabled so the phone is not asked to resend the same history.
+	client.ManualHistorySyncDownload = true
+	client.DisableManualHistorySyncReceipt = false
+}
+
+func isDirectChatJID(jid types.JID) bool {
+	if jid.User == "" || jid.Device != 0 || jid.RawAgent != 0 || jid.Integrator != 0 {
+		return false
+	}
+	switch jid.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.LegacyUserServer:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDirectChatJID(raw string) (types.JID, error) {
+	jid, err := types.ParseJID(raw)
+	if err != nil {
+		return types.EmptyJID, fmt.Errorf("invalid jid")
+	}
+	if !isDirectChatJID(jid) {
+		return types.EmptyJID, fmt.Errorf("direct chat jid required")
+	}
+	return jid, nil
+}
+
+func registerHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/health", instrumentHandler("health", healthHandler))
+	mux.Handle("/metrics", metricsHandler())
+	mux.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
+	mux.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
+	mux.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))
+	mux.HandleFunc("/sessions/delete", instrumentHandler("sessions_delete", deleteSessionHandler))
+	mux.HandleFunc("/sessions/save", instrumentHandler("sessions_save", saveSessionHandler))
+	mux.HandleFunc("/messages/send", instrumentHandler("messages_send", sendMessageHandler))
+	mux.HandleFunc("/messages/typing", instrumentHandler("messages_typing", setTypingHandler))
+	mux.HandleFunc("/messages/react", instrumentHandler("messages_react", sendReactionHandler))
+	mux.HandleFunc("/messages/image", instrumentHandler("messages_image", sendImageHandler))
+	mux.HandleFunc("/messages/audio", instrumentHandler("messages_audio", sendAudioHandler))
+	mux.HandleFunc("/messages/document", instrumentHandler("messages_document", sendDocumentHandler))
+	mux.HandleFunc("/messages/location", instrumentHandler("messages_location", sendLocationHandler))
+	mux.HandleFunc("/media/download", instrumentHandler("media_download", downloadMediaHandler))
+	mux.HandleFunc("/events", instrumentHandler("events", eventsHandler))
+}
+
 func main() {
 	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
 		err := sentry.Init(sentry.ClientOptions{
@@ -2057,25 +1927,8 @@ func main() {
 	manager = NewSessionManager(dataDir, joBotURL, encryptKey)
 	startPprofServer()
 
-	http.HandleFunc("/health", instrumentHandler("health", healthHandler))
-	http.Handle("/metrics", metricsHandler())
-	http.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
-	http.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
-	http.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))
-	http.HandleFunc("/sessions/delete", instrumentHandler("sessions_delete", deleteSessionHandler))
-	http.HandleFunc("/sessions/save", instrumentHandler("sessions_save", saveSessionHandler))
-	http.HandleFunc("/chats", instrumentHandler("chats", getChatsHandler))
-	http.HandleFunc("/groups/info", instrumentHandler("groups_info", getGroupInfoHandler))
-	http.HandleFunc("/groups/participants", instrumentHandler("groups_participants", listGroupParticipantsHandler))
-	http.HandleFunc("/messages/send", instrumentHandler("messages_send", sendMessageHandler))
-	http.HandleFunc("/messages/typing", instrumentHandler("messages_typing", setTypingHandler))
-	http.HandleFunc("/messages/react", instrumentHandler("messages_react", sendReactionHandler))
-	http.HandleFunc("/messages/image", instrumentHandler("messages_image", sendImageHandler))
-	http.HandleFunc("/messages/audio", instrumentHandler("messages_audio", sendAudioHandler))
-	http.HandleFunc("/messages/document", instrumentHandler("messages_document", sendDocumentHandler))
-	http.HandleFunc("/messages/location", instrumentHandler("messages_location", sendLocationHandler))
-	http.HandleFunc("/media/download", instrumentHandler("media_download", downloadMediaHandler))
-	http.HandleFunc("/events", instrumentHandler("events", eventsHandler))
+	mux := http.NewServeMux()
+	registerHandlers(mux)
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
 	log.Printf("📁 Data directory: %s", dataDir)
@@ -2086,7 +1939,7 @@ func main() {
 		log.Printf("🔐 Session persistence enabled")
 	}
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		sentry.CaptureException(err)
 		sentry.Flush(2 * time.Second)
 		log.Fatal(err)

@@ -27,10 +27,6 @@ type MockWhatsAppClient struct {
 	UploadError         error
 	DownloadData        []byte
 	DownloadError       error
-	JoinedGroups        []*types.GroupInfo
-	JoinedGroupsError   error
-	GroupInfo           *types.GroupInfo
-	GroupInfoError      error
 	QRChannelError      error
 
 	// Store mock
@@ -49,26 +45,11 @@ type MockCall struct {
 
 // MockDeviceStore implements DeviceStore for testing
 type MockDeviceStore struct {
-	ID       *types.JID
-	Contacts *MockContactStore
+	ID *types.JID
 }
 
 func (s *MockDeviceStore) GetID() *types.JID {
 	return s.ID
-}
-
-func (s *MockDeviceStore) GetContacts() ContactStore {
-	return s.Contacts
-}
-
-// MockContactStore implements ContactStore for testing
-type MockContactStore struct {
-	AllContacts   map[types.JID]types.ContactInfo
-	ContactsError error
-}
-
-func (c *MockContactStore) GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error) {
-	return c.AllContacts, c.ContactsError
 }
 
 // NewMockClient creates a disconnected mock client
@@ -76,11 +57,8 @@ func NewMockClient() *MockWhatsAppClient {
 	return &MockWhatsAppClient{
 		connected: false,
 		loggedIn:  false,
-		store: &MockDeviceStore{
-			ID:       nil,
-			Contacts: &MockContactStore{AllContacts: make(map[types.JID]types.ContactInfo)},
-		},
-		Calls: make([]MockCall, 0),
+		store:     &MockDeviceStore{},
+		Calls:     make([]MockCall, 0),
 	}
 }
 
@@ -149,11 +127,6 @@ func (m *MockWhatsAppClient) SetLoggedIn(loggedIn bool) {
 // SetDeviceID sets the device ID for Store.ID access
 func (m *MockWhatsAppClient) SetDeviceID(jid *types.JID) {
 	m.store.ID = jid
-}
-
-// SetContacts sets the contacts for Store.Contacts access
-func (m *MockWhatsAppClient) SetContacts(contacts map[types.JID]types.ContactInfo) {
-	m.store.Contacts.AllContacts = contacts
 }
 
 // WhatsAppClient interface implementation
@@ -253,16 +226,6 @@ func (m *MockWhatsAppClient) Download(ctx context.Context, msg whatsmeow.Downloa
 		return []byte("mock-image-data"), nil
 	}
 	return m.DownloadData, nil
-}
-
-func (m *MockWhatsAppClient) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
-	m.recordCall("GetJoinedGroups", ctx)
-	return m.JoinedGroups, m.JoinedGroupsError
-}
-
-func (m *MockWhatsAppClient) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
-	m.recordCall("GetGroupInfo", ctx, jid)
-	return m.GroupInfo, m.GroupInfoError
 }
 
 func (m *MockWhatsAppClient) GetStore() DeviceStore {
