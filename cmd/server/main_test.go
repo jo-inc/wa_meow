@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -337,6 +339,47 @@ func TestCreateSessionHandler(t *testing.T) {
 
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", w.Code)
+		}
+	})
+
+	t.Run("recovers when WhatsApp deleted the cached device", func(t *testing.T) {
+		var deleted atomic.Bool
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete || r.URL.Path != "/api/whatsapp/session" || r.URL.Query().Get("user_id") != "302" {
+				t.Errorf("unexpected backend request: %s %s", r.Method, r.URL.String())
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			deleted.Store(true)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer backend.Close()
+
+		manager = setupTestManager(t)
+		manager.joBotURL = backend.URL
+		mock := NewMockClient()
+		mock.ConnectError = store.ErrDeviceDeleted
+		injectMockSession(manager, 302, mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewBufferString(`{"user_id":302}`))
+		w := httptest.NewRecorder()
+		createSessionHandler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["status"] != "needs_qr" {
+			t.Fatalf("expected needs_qr, got %v", resp["status"])
+		}
+		if manager.GetSession(302) != nil {
+			t.Fatal("expected deleted device session to be discarded")
+		}
+		if !deleted.Load() {
+			t.Fatal("expected persisted deleted device session to be removed")
 		}
 	})
 }

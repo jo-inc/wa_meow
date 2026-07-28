@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waMmsRetry"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -472,6 +474,28 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	}
 
 	log.Printf("✅ Saved session to jo_bot")
+	return nil
+}
+
+func (m *SessionManager) deleteSessionFromJoBot(userID int) error {
+	if m.joBotURL == "" {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/api/whatsapp/session?user_id=%d", m.joBotURL, userID)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
+	resp, err := backendHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("delete failed: %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -998,6 +1022,22 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
+func recoverDeletedDevice(w http.ResponseWriter, userID int, session *UserSession, err error) bool {
+	if !errors.Is(err, store.ErrDeviceDeleted) {
+		return false
+	}
+
+	if discardErr := manager.DiscardDeletedSession(userID, session); discardErr != nil {
+		errorResponse(w, http.StatusInternalServerError, discardErr.Error())
+		return true
+	}
+	jsonResponse(w, map[string]interface{}{
+		"status":  "needs_qr",
+		"user_id": userID,
+	})
+	return true
+}
+
 func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1043,6 +1083,9 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		qrChan, _ := session.Client.GetQRChannel(context.Background())
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
+			if recoverDeletedDevice(w, req.UserID, session, err) {
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1075,6 +1118,9 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		sessionReconnectsTotal.Inc()
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
+			if recoverDeletedDevice(w, req.UserID, session, err) {
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}

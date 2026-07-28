@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -92,6 +93,45 @@ func (m *SessionManager) unloadIfIdle(session *UserSession) {
 	activeSessions.Dec()
 	sessionLifecycleTotal.WithLabelValues("unloaded").Inc()
 	log.Printf("Unloaded idle WhatsApp session user=%d after %s without logout", session.UserID, m.unloadGrace)
+}
+
+func (m *SessionManager) DiscardDeletedSession(userID int, expected *UserSession) error {
+	m.mu.Lock()
+	session, ok := m.sessions[userID]
+	if !ok || session != expected {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(m.sessions, userID)
+	session.lifecycleMu.Lock()
+	session.closed = true
+	if session.unloadTimer != nil {
+		session.unloadTimer.Stop()
+	}
+	listeners := session.sseListeners
+	session.sseListeners = 0
+	session.lifecycleMu.Unlock()
+	m.mu.Unlock()
+
+	if listeners > 0 {
+		activeSSEListeners.Sub(float64(listeners))
+	}
+	session.close(false)
+	if session.DBPath != "" {
+		for _, path := range []string{session.DBPath, session.DBPath + "-wal", session.DBPath + "-shm"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				log.Printf("Failed to delete invalid session database user=%d: %v", userID, err)
+			}
+		}
+	}
+	activeSessions.Dec()
+	sessionLifecycleTotal.WithLabelValues("invalidated").Inc()
+	log.Printf("Discarded deleted WhatsApp device user=%d; QR re-authentication required", userID)
+
+	if err := m.deleteSessionFromJoBot(userID); err != nil {
+		return fmt.Errorf("failed to delete persisted invalid session: %w", err)
+	}
+	return nil
 }
 
 func (m *SessionManager) acquireSSEListener(userID int) (*UserSession, bool) {
