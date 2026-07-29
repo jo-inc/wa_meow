@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mdp/qrterminal/v3"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWeb"
@@ -88,7 +88,8 @@ func main() {
 	}
 
 	fmt.Println("\n✅ Connected to WhatsApp!")
-	fmt.Println("Type 'help' for available commands.\n")
+	fmt.Println("Type 'help' for available commands.")
+	fmt.Println()
 
 	go app.runREPL()
 
@@ -257,7 +258,7 @@ func (a *App) runREPL() {
 }
 
 func (a *App) showHelp() {
-	fmt.Println(`
+	fmt.Print(`
 📱 WhatsApp CLI Commands:
   chats / list      - List all chats
   search <query>    - Search chats by name
@@ -272,7 +273,7 @@ func (a *App) showHelp() {
 func (a *App) listChats() {
 	fmt.Println("\n📋 Loading chats...")
 	ctx := context.Background()
-	
+
 	groups, err := a.client.GetJoinedGroups(ctx)
 	if err != nil {
 		fmt.Printf("Error getting groups: %v\n", err)
@@ -335,7 +336,7 @@ func (a *App) searchChats(query string) {
 
 	query = strings.ToLower(query)
 	fmt.Printf("\n🔍 Searching for '%s':\n", query)
-	
+
 	found := 0
 	for i, chat := range a.chats {
 		if strings.Contains(strings.ToLower(chat.Name), query) ||
@@ -348,7 +349,7 @@ func (a *App) searchChats(query string) {
 			found++
 		}
 	}
-	
+
 	if found == 0 {
 		fmt.Println("  No matches found.")
 	}
@@ -390,14 +391,16 @@ func (a *App) showMessages() {
 	stored, ok := a.messageStore.Load(chatJID)
 	if !ok || stored == nil {
 		fmt.Println("\n💬 No messages synced for this chat yet.")
-		fmt.Println("Messages will appear as they arrive.\n")
+		fmt.Println("Messages will appear as they arrive.")
+		fmt.Println()
 		return
 	}
 
 	messages := stored.([]StoredMessage)
 	if len(messages) == 0 {
 		fmt.Println("\n💬 No messages synced for this chat yet.")
-		fmt.Println("Messages will appear as they arrive.\n")
+		fmt.Println("Messages will appear as they arrive.")
+		fmt.Println()
 		return
 	}
 
@@ -459,15 +462,15 @@ func (a *App) sendMessage(text string) {
 func (a *App) showStatus() {
 	connected := a.client.IsConnected()
 	loggedIn := a.client.IsLoggedIn()
-	
+
 	fmt.Printf("\n📊 Status:\n")
 	fmt.Printf("  Connected: %v\n", connected)
 	fmt.Printf("  Logged In: %v\n", loggedIn)
-	
+
 	if a.client.Store.ID != nil {
 		fmt.Printf("  Phone: %s\n", a.client.Store.ID.User)
 	}
-	
+
 	if !a.currentChat.IsEmpty() {
 		for _, chat := range a.chats {
 			if chat.JID == a.currentChat {
