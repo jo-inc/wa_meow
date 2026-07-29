@@ -60,6 +60,7 @@ type SessionManager struct {
 	joBotInternalToken string
 	encryptKey         []byte
 	unloadGrace        time.Duration
+	loadSession        func(int) (*UserSession, error)
 }
 
 // PendingMediaRetry stores info needed to complete a media retry download
@@ -317,7 +318,7 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 		}
 	}
 
-	return &SessionManager{
+	manager := &SessionManager{
 		sessions:           make(map[int]*UserSession),
 		dataDir:            dataDir,
 		joBotURL:           joBotURL,
@@ -325,6 +326,8 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 		encryptKey:         encryptKey,
 		unloadGrace:        configuredUnloadGrace(),
 	}
+	manager.loadSession = manager.GetOrCreateSession
+	return manager
 }
 
 func (m *SessionManager) encrypt(data []byte) (string, error) {
@@ -575,6 +578,57 @@ func (m *SessionManager) GetSession(userID int) *UserSession {
 		// activity. Refresh the grace timer so teardown cannot race normal work.
 		m.scheduleUnloadLocked(session)
 		return session
+	}
+	return nil
+}
+
+var (
+	errSessionNotFound    = errors.New("session not found")
+	errSessionNotLoggedIn = errors.New("not logged in")
+)
+
+func (m *SessionManager) getOperationalSession(userID int) (*UserSession, error) {
+	session := m.GetSession(userID)
+	if session == nil {
+		var err error
+		session, err = m.loadSession(userID)
+		if err != nil {
+			return nil, err
+		}
+		if session.Client.GetStore().GetID() == nil {
+			return nil, errSessionNotFound
+		}
+	}
+
+	if !session.Client.IsConnected() {
+		sessionReconnectsTotal.Inc()
+		if err := session.Client.Connect(); err != nil && !strings.Contains(err.Error(), "already connected") {
+			if errors.Is(err, store.ErrDeviceDeleted) {
+				if discardErr := m.DiscardDeletedSession(userID, session); discardErr != nil {
+					return nil, discardErr
+				}
+				return nil, errSessionNotFound
+			}
+			return nil, err
+		}
+	}
+	if !session.Client.IsLoggedIn() {
+		return nil, errSessionNotLoggedIn
+	}
+	return session, nil
+}
+
+func operationalSession(w http.ResponseWriter, userID int) *UserSession {
+	session, err := manager.getOperationalSession(userID)
+	if err == nil {
+		return session
+	}
+	if errors.Is(err, errSessionNotFound) {
+		errorResponse(w, http.StatusNotFound, err.Error())
+	} else if errors.Is(err, errSessionNotLoggedIn) {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+	} else {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
 	}
 	return nil
 }
@@ -1245,14 +1299,8 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1313,14 +1361,8 @@ func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1374,14 +1416,8 @@ func setTypingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1480,14 +1516,8 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1559,14 +1589,8 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1649,14 +1673,8 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1726,14 +1744,8 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -1790,14 +1802,8 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 

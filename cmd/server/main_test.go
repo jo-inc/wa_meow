@@ -595,6 +595,33 @@ func TestSendMessageHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("restores and reconnects an unloaded session", func(t *testing.T) {
+		manager = setupTestManager(t)
+		mock := NewLoggedInMockClient()
+		mock.SetConnected(false)
+		manager.loadSession = func(userID int) (*UserSession, error) {
+			if userID != 601 {
+				t.Fatalf("expected user 601, got %d", userID)
+			}
+			return injectMockSession(manager, userID, mock), nil
+		}
+
+		body := `{"user_id": 601, "chat_jid": "1234567890@s.whatsapp.net", "text": "hello"}`
+		req := httptest.NewRequest(http.MethodPost, "/messages/send", bytes.NewBufferString(body))
+		w := httptest.NewRecorder()
+		sendMessageHandler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if calls := mock.GetCallsByMethod("Connect"); len(calls) != 1 {
+			t.Fatalf("expected one reconnect, got %d", len(calls))
+		}
+		if calls := mock.GetCallsByMethod("SendMessage"); len(calls) != 1 {
+			t.Fatalf("expected one message send, got %d", len(calls))
+		}
+	})
+
 	t.Run("returns 400 when not logged in", func(t *testing.T) {
 		manager = setupTestManager(t)
 		mock := NewConnectedMockClient() // Connected but not logged in
