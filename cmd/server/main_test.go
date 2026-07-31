@@ -177,6 +177,62 @@ func TestPIIPresence(t *testing.T) {
 	}
 }
 
+func TestClassifyWhatsAppClientError(t *testing.T) {
+	tests := []struct {
+		message string
+		want    string
+	}{
+		{"Error reading from websocket: failed to read frame header: EOF", "socket_eof"},
+		{"Failed to sync app state: mismatching LTHash", "app_state_lthash"},
+		{"Error reconnecting after autoreconnect sleep: network unavailable", "reconnect_failed"},
+		{"unrelated client error", ""},
+	}
+	for _, test := range tests {
+		if got := classifyWhatsAppClientError(test.message); got != test.want {
+			t.Errorf("classifyWhatsAppClientError(%q) = %q, want %q", test.message, got, test.want)
+		}
+	}
+}
+
+func TestSocketEOFBurst(t *testing.T) {
+	socketEOFBurstState.Lock()
+	socketEOFBurstState.occurred = nil
+	socketEOFBurstState.lastReported = time.Time{}
+	socketEOFBurstState.Unlock()
+
+	now := time.Now()
+	if isSocketEOFBurst(now) || isSocketEOFBurst(now.Add(time.Second)) {
+		t.Fatal("expected fewer than three EOFs not to be a burst")
+	}
+	if !isSocketEOFBurst(now.Add(2 * time.Second)) {
+		t.Fatal("expected three EOFs within five minutes to be a burst")
+	}
+	if isSocketEOFBurst(now.Add(3 * time.Second)) {
+		t.Fatal("expected burst reporting cooldown")
+	}
+}
+
+func TestWhatsAppTransportSignal(t *testing.T) {
+	tests := []struct {
+		event interface{}
+		want  string
+	}{
+		{&events.Connected{}, "connected"},
+		{&events.Disconnected{}, "disconnected"},
+		{&events.LoggedOut{}, "logged_out"},
+		{&events.StreamReplaced{}, "stream_replaced"},
+		{&events.ConnectFailure{}, "connect_failure"},
+		{&events.KeepAliveTimeout{}, "keepalive_timeout"},
+		{&events.KeepAliveRestored{}, "keepalive_restored"},
+		{&events.Message{}, ""},
+	}
+	for _, test := range tests {
+		if got := whatsappTransportSignal(test.event); got != test.want {
+			t.Errorf("whatsappTransportSignal(%T) = %q, want %q", test.event, got, test.want)
+		}
+	}
+}
+
 func TestSessionManager_GetSession(t *testing.T) {
 	m := setupTestManager(t)
 

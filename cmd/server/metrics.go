@@ -56,6 +56,16 @@ var (
 		Name: "jo_whatsapp_session_reconnects_total",
 		Help: "Total WA session reconnection events",
 	})
+
+	transportSignalsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "jo_whatsapp_transport_signals_total",
+		Help: "WhatsApp client transport and session signals",
+	}, []string{"signal"})
+
+	clientErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "jo_whatsapp_client_errors_total",
+		Help: "Classified WhatsApp client errors",
+	}, []string{"reason"})
 )
 
 func metricsHandler() http.Handler {
@@ -69,6 +79,9 @@ func instrumentHandler(endpoint string, next http.HandlerFunc) http.HandlerFunc 
 		if rw.status >= 400 {
 			webhookRequestsTotal.WithLabelValues("error").Inc()
 			apiErrorsTotal.WithLabelValues(endpoint).Inc()
+			if rw.status >= http.StatusInternalServerError {
+				captureSanitizedSentrySignal("api_5xx_" + endpoint)
+			}
 		} else {
 			webhookRequestsTotal.WithLabelValues("success").Inc()
 		}

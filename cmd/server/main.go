@@ -219,6 +219,145 @@ func piiPresence(value string) string {
 	return fmt.Sprintf("present(hash=%s,len=%d)", piiFingerprint(value), len(value))
 }
 
+const sentrySignalCooldown = 10 * time.Minute
+
+var sentrySignalState = struct {
+	sync.Mutex
+	lastSent map[string]time.Time
+}{lastSent: make(map[string]time.Time)}
+
+var socketEOFBurstState = struct {
+	sync.Mutex
+	occurred     []time.Time
+	lastReported time.Time
+}{}
+
+func captureSanitizedSentrySignal(signal string) {
+	now := time.Now()
+	sentrySignalState.Lock()
+	if last := sentrySignalState.lastSent[signal]; now.Sub(last) < sentrySignalCooldown {
+		sentrySignalState.Unlock()
+		return
+	}
+	sentrySignalState.lastSent[signal] = now
+	sentrySignalState.Unlock()
+
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("component", "whatsapp_bridge")
+		scope.SetTag("signal", signal)
+		sentry.CaptureMessage("WhatsApp bridge reliability signal")
+	})
+}
+
+func isSocketEOFBurst(now time.Time) bool {
+	socketEOFBurstState.Lock()
+	defer socketEOFBurstState.Unlock()
+
+	cutoff := now.Add(-5 * time.Minute)
+	kept := socketEOFBurstState.occurred[:0]
+	for _, occurred := range socketEOFBurstState.occurred {
+		if occurred.After(cutoff) {
+			kept = append(kept, occurred)
+		}
+	}
+	socketEOFBurstState.occurred = append(kept, now)
+	if len(socketEOFBurstState.occurred) < 3 || now.Sub(socketEOFBurstState.lastReported) < sentrySignalCooldown {
+		return false
+	}
+	socketEOFBurstState.lastReported = now
+	return true
+}
+
+func reportClientErrorToSentry(reason string) {
+	switch reason {
+	case "app_state_lthash", "reconnect_failed":
+		captureSanitizedSentrySignal(reason)
+	case "socket_eof":
+		if isSocketEOFBurst(time.Now()) {
+			captureSanitizedSentrySignal("socket_eof_burst")
+		}
+	}
+}
+
+func reportTransportSignalToSentry(signal string) {
+	switch signal {
+	case "logged_out", "stream_replaced", "connect_failure":
+		captureSanitizedSentrySignal(signal)
+	}
+}
+
+type clientTelemetry struct {
+	session *UserSession
+}
+
+func (t *clientTelemetry) track(signal string) {
+	transportSignalsTotal.WithLabelValues(signal).Inc()
+	if t.session != nil {
+		log.Printf("[whatsapp/transport] signal=%s session=%s", signal, piiFingerprint(fmt.Sprint(t.session.UserID)))
+	} else {
+		log.Printf("[whatsapp/transport] signal=%s", signal)
+	}
+}
+
+func classifyWhatsAppClientError(message string) string {
+	switch {
+	case strings.Contains(message, "mismatching LTHash"):
+		return "app_state_lthash"
+	case strings.Contains(message, "Error reconnecting after autoreconnect sleep"):
+		return "reconnect_failed"
+	case strings.Contains(message, "Error reading from websocket") && strings.Contains(message, "EOF"):
+		return "socket_eof"
+	default:
+		return ""
+	}
+}
+
+type telemetryLogger struct {
+	delegate  waLog.Logger
+	telemetry *clientTelemetry
+}
+
+func newTelemetryLogger(delegate waLog.Logger, telemetry *clientTelemetry) waLog.Logger {
+	return &telemetryLogger{delegate: delegate, telemetry: telemetry}
+}
+
+func (l *telemetryLogger) Warnf(msg string, args ...interface{})  { l.delegate.Warnf(msg, args...) }
+func (l *telemetryLogger) Infof(msg string, args ...interface{})  { l.delegate.Infof(msg, args...) }
+func (l *telemetryLogger) Debugf(msg string, args ...interface{}) { l.delegate.Debugf(msg, args...) }
+func (l *telemetryLogger) Errorf(msg string, args ...interface{}) {
+	formatted := fmt.Sprintf(msg, args...)
+	if reason := classifyWhatsAppClientError(formatted); reason != "" {
+		clientErrorsTotal.WithLabelValues(reason).Inc()
+		l.telemetry.track(reason)
+		reportClientErrorToSentry(reason)
+	}
+	l.delegate.Errorf("%s", formatted)
+}
+func (l *telemetryLogger) Sub(module string) waLog.Logger {
+	return &telemetryLogger{delegate: l.delegate.Sub(module), telemetry: l.telemetry}
+}
+
+func whatsappTransportSignal(evt interface{}) string {
+	switch evt.(type) {
+	case *events.Connected:
+		return "connected"
+	case *events.Disconnected:
+		return "disconnected"
+	case *events.LoggedOut:
+		return "logged_out"
+	case *events.StreamReplaced:
+		return "stream_replaced"
+	case *events.ConnectFailure:
+		return "connect_failure"
+	case *events.KeepAliveTimeout:
+		return "keepalive_timeout"
+	case *events.KeepAliveRestored:
+		return "keepalive_restored"
+	default:
+		return ""
+	}
+}
+
 var manager *SessionManager
 
 func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager {
@@ -422,7 +561,8 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	}
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
-	rawClient := whatsmeow.NewClient(deviceStore, clientLog)
+	clientTelemetry := &clientTelemetry{}
+	rawClient := whatsmeow.NewClient(deviceStore, newTelemetryLogger(clientLog, clientTelemetry))
 
 	// Configure a custom HTTP client for media downloads that mimics Baileys:
 	// 1. Remove Referer header (Baileys doesn't send it)
@@ -458,6 +598,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	}
 
 	session.startMediaCacheEvictor()
+	clientTelemetry.session = session
 
 	rawClient.AddEventHandler(func(evt interface{}) {
 		session.handleEvent(evt)
@@ -510,6 +651,12 @@ func (m *SessionManager) SaveSession(userID int) {
 }
 
 func (s *UserSession) handleEvent(evt interface{}) {
+	if signal := whatsappTransportSignal(evt); signal != "" {
+		transportSignalsTotal.WithLabelValues(signal).Inc()
+		log.Printf("[whatsapp/transport] signal=%s session=%s", signal, piiFingerprint(fmt.Sprint(s.UserID)))
+		reportTransportSignalToSentry(signal)
+	}
+
 	switch v := evt.(type) {
 	case *events.Message:
 		eventStart := time.Now()
