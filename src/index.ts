@@ -54,34 +54,6 @@ interface ChannelPlugin {
   gateway?: GatewayAdapter;
   setup?: SetupAdapter;
   status?: StatusAdapter;
-  groups?: GroupsAdapter;
-}
-
-interface GroupsAdapter {
-  getGroupInfo(ctx: GroupContext): Promise<GroupInfoResult>;
-  listParticipants(ctx: GroupContext): Promise<ParticipantResult[]>;
-}
-
-interface GroupContext {
-  accountId: string;
-  groupId: string;
-}
-
-interface GroupInfoResult {
-  id: string;
-  name: string;
-  topic?: string;
-  createdAt?: number;
-  creatorId?: string;
-  participantCount: number;
-  isAnnounceOnly: boolean;
-  isLocked: boolean;
-}
-
-interface ParticipantResult {
-  id: string;
-  isAdmin: boolean;
-  isSuperAdmin: boolean;
 }
 
 interface ChannelMeta {
@@ -419,7 +391,7 @@ function createChannelPlugin(): ChannelPlugin {
     },
 
     capabilities: {
-      chatTypes: ["dm", "group"],
+      chatTypes: ["dm"],
       supportsMedia: true,
       supportsThreads: false,
       supportsReactions: true,
@@ -736,40 +708,6 @@ function createChannelPlugin(): ChannelPlugin {
       },
     },
 
-    groups: {
-      async getGroupInfo(ctx: GroupContext): Promise<GroupInfoResult> {
-        const userId = getUserId(ctx.accountId);
-        if (!userId) {
-          throw new Error(`Unknown account: ${ctx.accountId}`);
-        }
-
-        const info = await client.getGroupInfo(userId, ctx.groupId);
-        return {
-          id: info.jid,
-          name: info.name,
-          topic: info.topic,
-          createdAt: info.created,
-          creatorId: info.creator_jid,
-          participantCount: info.participants.length,
-          isAnnounceOnly: info.is_announce,
-          isLocked: info.is_locked,
-        };
-      },
-
-      async listParticipants(ctx: GroupContext): Promise<ParticipantResult[]> {
-        const userId = getUserId(ctx.accountId);
-        if (!userId) {
-          throw new Error(`Unknown account: ${ctx.accountId}`);
-        }
-
-        const participants = await client.getGroupParticipants(userId, ctx.groupId);
-        return participants.map((p) => ({
-          id: p.jid,
-          isAdmin: p.is_admin,
-          isSuperAdmin: p.is_super_admin,
-        }));
-      },
-    },
   };
 }
 

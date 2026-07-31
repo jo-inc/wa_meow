@@ -7,9 +7,9 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +27,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waMmsRetry"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -41,13 +42,14 @@ type baileysTransport struct {
 }
 
 func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Remove Referer header (Baileys doesn't send it)
-	req.Header.Del("Referer")
-	// Remove User-Agent (Baileys doesn't send it for media downloads)
-	req.Header.Del("User-Agent")
-	// Log what we're actually sending
-	log.Printf("[media/http] Request: %s, Headers: Origin=%s", req.URL.Host, req.Header.Get("Origin"))
-	return t.base.RoundTrip(req)
+	// RoundTrippers must not mutate the caller's request. Clone both the request
+	// and headers before applying the WhatsApp Web media fingerprint.
+	mediaReq := req.Clone(req.Context())
+	mediaReq.Header = req.Header.Clone()
+	mediaReq.Header.Del("Referer")
+	mediaReq.Header.Del("User-Agent")
+	log.Printf("[media/http] Request: %s, Headers: Origin=%s", mediaReq.URL.Host, mediaReq.Header.Get("Origin"))
+	return t.base.RoundTrip(mediaReq)
 }
 
 type SessionManager struct {
@@ -57,6 +59,8 @@ type SessionManager struct {
 	joBotURL           string
 	joBotInternalToken string
 	encryptKey         []byte
+	unloadGrace        time.Duration
+	loadSession        func(int) (*UserSession, error)
 }
 
 // PendingMediaRetry stores info needed to complete a media retry download
@@ -69,98 +73,182 @@ type PendingMediaRetry struct {
 
 // mediaCacheEntry wraps cached media with a timestamp for TTL eviction
 type mediaCacheEntry struct {
-	data      []byte
-	cachedAt  time.Time
+	data     []byte
+	cachedAt time.Time
 }
 
 const (
-	mediaCacheTTL     = 5 * time.Minute  // Evict entries older than 5 minutes
-	mediaCacheMaxSize = 200 * 1024 * 1024 // 200MB hard cap
-	mediaCacheEvictInterval = 30 * time.Second // How often to run eviction
+	mediaCacheTTL            = 5 * time.Minute
+	mediaCacheGlobalMaxBytes = 100 * 1024 * 1024
+	mediaCacheMaxEntryBytes  = 25 * 1024 * 1024
+	mediaCacheEvictInterval  = 30 * time.Second
+	defaultUnloadGrace       = 5 * time.Minute
 )
 
+// mediaCacheBudget is shared by every session in the process. Its mutex is the
+// reservation boundary: bytes can never be committed above limit, even when
+// different sessions insert concurrently.
+type mediaCacheBudget struct {
+	mu      sync.Mutex
+	limit   int64
+	bytes   int64
+	entries int64
+}
+
+var processMediaCacheBudget = &mediaCacheBudget{limit: mediaCacheGlobalMaxBytes}
+
 type UserSession struct {
-	UserID     int
-	Client     WhatsAppClient
-	Container  *sqlstore.Container
-	DBPath     string
-	LastUsed   time.Time
-	QRChannel  chan string
-	LoginDone  chan bool
-	EventChan  chan MessageEvent
-	MediaCache map[string]*mediaCacheEntry // Cache downloaded media by message ID
-	MediaMu    sync.RWMutex
-	mediaCacheSize int64 // Current total bytes in cache
+	UserID           int
+	Client           WhatsAppClient
+	Container        *sqlstore.Container
+	DBPath           string
+	LastUsed         time.Time
+	QRChannel        chan string
+	LoginDone        chan bool
+	EventChan        chan MessageEvent
+	MediaCache       map[string]*mediaCacheEntry // Cache downloaded media by message ID
+	MediaMu          sync.RWMutex
+	mediaCacheSize   int64 // Current total bytes in this session's cache
+	mediaCacheBudget *mediaCacheBudget
+	mediaCacheClosed bool
 	// Pending media retries: message ID -> pending retry info
 	PendingRetries   map[string]*PendingMediaRetry
 	PendingRetriesMu sync.RWMutex
+
+	lifecycleMu     sync.Mutex
+	sseListeners    int
+	zeroListenersAt time.Time
+	unloadTimer     *time.Timer
+	closed          bool
+	closeOnce       sync.Once
+	evictCancel     context.CancelFunc
+	evictWG         sync.WaitGroup
+	eventWG         sync.WaitGroup
 }
 
-// mediaCachePut adds an entry to the cache, evicting oldest if over size cap
-func (s *UserSession) mediaCachePut(msgID string, data []byte) {
-	s.MediaMu.Lock()
-	defer s.MediaMu.Unlock()
+func (s *UserSession) cacheBudget() *mediaCacheBudget {
+	if s.mediaCacheBudget != nil {
+		return s.mediaCacheBudget
+	}
+	return processMediaCacheBudget
+}
 
-	// If this message is already cached, remove old size
-	if existing, ok := s.MediaCache[msgID]; ok {
-		s.mediaCacheSize -= int64(len(existing.data))
+// Cache lock order is always process budget -> session MediaMu. No cache path
+// may acquire these in the opposite order. Holding both locks makes reservation,
+// map mutation, accounting, and Prometheus updates one atomic operation.
+func (s *UserSession) lockMediaCache() *mediaCacheBudget {
+	budget := s.cacheBudget()
+	budget.mu.Lock()
+	s.MediaMu.Lock()
+	return budget
+}
+
+func (s *UserSession) unlockMediaCache(budget *mediaCacheBudget) {
+	s.MediaMu.Unlock()
+	budget.mu.Unlock()
+}
+
+// mediaCachePut adds an entry only if it fits the process-wide hard budget.
+// Rejected data is not retained; callers can still use the direct download path.
+func (s *UserSession) mediaCachePut(msgID string, data []byte) bool {
+	size := int64(len(data))
+	if size == 0 || size > mediaCacheMaxEntryBytes {
+		mediaCacheEvictionsTotal.WithLabelValues("entry_too_large").Inc()
+		return false
+	}
+
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
+	if s.mediaCacheClosed {
+		mediaCacheEvictionsTotal.WithLabelValues("session_closed").Inc()
+		return false
+	}
+	if s.MediaCache == nil {
+		s.MediaCache = make(map[string]*mediaCacheEntry)
+	}
+
+	existing, replacing := s.MediaCache[msgID]
+	oldSize := int64(0)
+	if replacing {
+		oldSize = int64(len(existing.data))
+	}
+	newBudgetBytes := budget.bytes - oldSize + size
+	if newBudgetBytes > budget.limit {
+		mediaCacheEvictionsTotal.WithLabelValues("budget").Inc()
+		return false
 	}
 
 	s.MediaCache[msgID] = &mediaCacheEntry{data: data, cachedAt: time.Now()}
-	s.mediaCacheSize += int64(len(data))
-
-	// If over size cap, evict oldest entries until under
-	for s.mediaCacheSize > mediaCacheMaxSize && len(s.MediaCache) > 0 {
-		var oldestID string
-		var oldestTime time.Time
-		for id, entry := range s.MediaCache {
-			if oldestID == "" || entry.cachedAt.Before(oldestTime) {
-				oldestID = id
-				oldestTime = entry.cachedAt
-			}
-		}
-		if oldestID != "" {
-			s.mediaCacheSize -= int64(len(s.MediaCache[oldestID].data))
-			delete(s.MediaCache, oldestID)
-			log.Printf("[media/cache] Evicted msg=%s (size cap), cache size now %dMB", piiFingerprint(oldestID), s.mediaCacheSize/(1024*1024))
-		}
+	s.mediaCacheSize += size - oldSize
+	budget.bytes = newBudgetBytes
+	mediaCacheBytes.Add(float64(size - oldSize))
+	if !replacing {
+		budget.entries++
+		mediaCacheEntries.Inc()
 	}
+	return true
 }
 
-// mediaCacheGet retrieves and removes an entry from the cache (consume-once)
+// mediaCacheGet retrieves and removes an entry from the cache (consume-once).
 func (s *UserSession) mediaCacheGet(msgID string) ([]byte, bool) {
-	s.MediaMu.Lock()
-	defer s.MediaMu.Unlock()
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
 	entry, ok := s.MediaCache[msgID]
 	if !ok {
 		return nil, false
 	}
 	data := entry.data
-	s.mediaCacheSize -= int64(len(data))
+	sz := int64(len(data))
+	s.mediaCacheSize -= sz
+	budget.bytes -= sz
+	budget.entries--
 	delete(s.MediaCache, msgID)
+	mediaCacheEntries.Dec()
+	mediaCacheBytes.Sub(float64(sz))
 	return data, true
+}
+
+func (s *UserSession) mediaCacheEvictExpired(now time.Time) int {
+	budget := s.lockMediaCache()
+	defer s.unlockMediaCache(budget)
+	var evicted int
+	var evictedBytes int64
+	for id, entry := range s.MediaCache {
+		if now.Sub(entry.cachedAt) > mediaCacheTTL {
+			sz := int64(len(entry.data))
+			s.mediaCacheSize -= sz
+			budget.bytes -= sz
+			budget.entries--
+			evictedBytes += sz
+			delete(s.MediaCache, id)
+			evicted++
+		}
+	}
+	if evicted > 0 {
+		mediaCacheEntries.Sub(float64(evicted))
+		mediaCacheBytes.Sub(float64(evictedBytes))
+		mediaCacheEvictionsTotal.WithLabelValues("ttl").Add(float64(evicted))
+		log.Printf("[media/cache] TTL eviction: removed %d entries, process cache now %dMB (%d entries)", evicted, budget.bytes/(1024*1024), budget.entries)
+	}
+	return evicted
 }
 
 // startMediaCacheEvictor runs a background goroutine that evicts expired entries
 func (s *UserSession) startMediaCacheEvictor() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.evictCancel = cancel
+	s.evictWG.Add(1)
 	go func() {
+		defer s.evictWG.Done()
 		ticker := time.NewTicker(mediaCacheEvictInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.MediaMu.Lock()
-			now := time.Now()
-			var evicted int
-			for id, entry := range s.MediaCache {
-				if now.Sub(entry.cachedAt) > mediaCacheTTL {
-					s.mediaCacheSize -= int64(len(entry.data))
-					delete(s.MediaCache, id)
-					evicted++
-				}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.mediaCacheEvictExpired(time.Now())
 			}
-			if evicted > 0 {
-				log.Printf("[media/cache] TTL eviction: removed %d entries, cache size now %dMB (%d entries)", evicted, s.mediaCacheSize/(1024*1024), len(s.MediaCache))
-			}
-			s.MediaMu.Unlock()
 		}
 	}()
 }
@@ -196,12 +284,6 @@ type MessagePayload struct {
 	FileSHA256    []byte `json:"file_sha256,omitempty"`
 	FileLength    uint64 `json:"file_length,omitempty"`
 	IsPTT         bool   `json:"is_ptt,omitempty"` // Push-to-talk (voice note) - critical for download
-}
-
-type ChatPayload struct {
-	JID     string `json:"jid"`
-	Name    string `json:"name"`
-	IsGroup bool   `json:"is_group"`
 }
 
 func piiFingerprint(value string) string {
@@ -375,13 +457,16 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 		}
 	}
 
-	return &SessionManager{
+	manager := &SessionManager{
 		sessions:           make(map[int]*UserSession),
 		dataDir:            dataDir,
 		joBotURL:           joBotURL,
 		joBotInternalToken: strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
 		encryptKey:         encryptKey,
+		unloadGrace:        configuredUnloadGrace(),
 	}
+	manager.loadSession = manager.GetOrCreateSession
+	return manager
 }
 
 func (m *SessionManager) encrypt(data []byte) (string, error) {
@@ -447,7 +532,7 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 		return nil
 	}
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backendHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to fetch session from jo_bot backend for user %d: %v", userID, err)
 		return nil
@@ -518,7 +603,7 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backendHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to save session to jo_bot backend for user %d: %v", userID, err)
 		return err
@@ -534,12 +619,35 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	return nil
 }
 
+func (m *SessionManager) deleteSessionFromJoBot(userID int) error {
+	if m.joBotURL == "" {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/api/whatsapp/session?user_id=%d", m.joBotURL, userID)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-WhatsApp-Internal-Token", m.joBotInternalToken)
+	resp, err := backendHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("delete failed: %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if session, ok := m.sessions[userID]; ok {
 		session.LastUsed = time.Now()
+		m.scheduleUnloadLocked(session)
 		return session, nil
 	}
 
@@ -557,30 +665,17 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
+		_ = container.Close()
 		return nil, fmt.Errorf("failed to get device: %w", err)
 	}
 
 	clientLog := waLog.Stdout("Client", "ERROR", true)
 	clientTelemetry := &clientTelemetry{}
 	rawClient := whatsmeow.NewClient(deviceStore, newTelemetryLogger(clientLog, clientTelemetry))
+	configureDirectChatClient(rawClient)
 
-	// Configure a custom HTTP client for media downloads that mimics Baileys:
-	// 1. Remove Referer header (Baileys doesn't send it)
-	// 2. Force HTTP/1.1 to avoid potential HTTP/2 fingerprinting issues
-	// 3. TLSNextProto=empty map disables HTTP/2 negotiation
-	baseTransport := &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		ForceAttemptHTTP2: false,
-		TLSNextProto:      map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
-		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
-	}
-	customTransport := &baileysTransport{
-		base: baseTransport,
-	}
-	rawClient.SetMediaHTTPClient(&http.Client{
-		Transport: customTransport,
-		Timeout:   60 * time.Second,
-	})
+	// Share the media transport and connection pool across all sessions.
+	rawClient.SetMediaHTTPClient(sharedMediaHTTPClient)
 
 	client := newRealClientWrapper(rawClient)
 
@@ -601,45 +696,118 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	clientTelemetry.session = session
 
 	rawClient.AddEventHandler(func(evt interface{}) {
+		if !session.beginEvent() {
+			return
+		}
+		defer session.eventWG.Done()
 		session.handleEvent(evt)
 	})
 
 	m.sessions[userID] = session
 	activeSessions.Inc()
+	sessionLifecycleTotal.WithLabelValues("created").Inc()
+	m.scheduleUnloadLocked(session)
 	return session, nil
 }
 
 func (m *SessionManager) GetSession(userID int) *UserSession {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if session, ok := m.sessions[userID]; ok {
 		session.LastUsed = time.Now()
+		// Short non-SSE operations (send, typing, media, status) also count as
+		// activity. Refresh the grace timer so teardown cannot race normal work.
+		m.scheduleUnloadLocked(session)
 		return session
+	}
+	return nil
+}
+
+var (
+	errSessionNotFound    = errors.New("session not found")
+	errSessionNotLoggedIn = errors.New("not logged in")
+)
+
+func (m *SessionManager) getOperationalSession(userID int) (*UserSession, error) {
+	session := m.GetSession(userID)
+	if session == nil {
+		var err error
+		session, err = m.loadSession(userID)
+		if err != nil {
+			return nil, err
+		}
+		if session.Client.GetStore().GetID() == nil {
+			return nil, errSessionNotFound
+		}
+	}
+
+	if !session.Client.IsConnected() {
+		sessionReconnectsTotal.Inc()
+		if err := session.Client.Connect(); err != nil && !strings.Contains(err.Error(), "already connected") {
+			if errors.Is(err, store.ErrDeviceDeleted) {
+				if discardErr := m.DiscardDeletedSession(userID, session); discardErr != nil {
+					return nil, discardErr
+				}
+				return nil, errSessionNotFound
+			}
+			return nil, err
+		}
+	}
+	if !session.Client.IsLoggedIn() {
+		return nil, errSessionNotLoggedIn
+	}
+	return session, nil
+}
+
+func operationalSession(w http.ResponseWriter, userID int) *UserSession {
+	session, err := manager.getOperationalSession(userID)
+	if err == nil {
+		return session
+	}
+	if errors.Is(err, errSessionNotFound) {
+		errorResponse(w, http.StatusNotFound, err.Error())
+	} else if errors.Is(err, errSessionNotLoggedIn) {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+	} else {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
 	}
 	return nil
 }
 
 func (m *SessionManager) RemoveSession(userID int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if session, ok := m.sessions[userID]; ok {
-		// Logout invalidates the WA session server-side so re-connect requires fresh QR
-		if session.Client.IsLoggedIn() {
-			if err := session.Client.Logout(); err != nil {
-				log.Printf("⚠️ Logout failed during session removal: %v (continuing with disconnect)", err)
-			}
-		} else {
-			session.Client.Disconnect()
-		}
-		// Delete the local session DB so GetOrCreateSession starts fresh
-		if session.DBPath != "" {
-			if err := os.Remove(session.DBPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("⚠️ Failed to delete session DB: %v", err)
-			}
-		}
+	session, ok := m.sessions[userID]
+	if ok {
 		delete(m.sessions, userID)
-		activeSessions.Dec()
+		session.lifecycleMu.Lock()
+		session.closed = true
+		if session.unloadTimer != nil {
+			session.unloadTimer.Stop()
+		}
+		listeners := session.sseListeners
+		session.sseListeners = 0
+		session.lifecycleMu.Unlock()
+		if listeners > 0 {
+			activeSSEListeners.Sub(float64(listeners))
+		}
 	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// Explicit deletion invalidates the linked device and deletes local state.
+	// Automatic idle unload deliberately does neither.
+	session.close(true)
+	if session.DBPath != "" {
+		for _, path := range []string{session.DBPath, session.DBPath + "-wal", session.DBPath + "-shm"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				log.Printf("Failed to delete session database user=%d: %v", userID, err)
+			}
+		}
+	}
+	activeSessions.Dec()
+	sessionLifecycleTotal.WithLabelValues("deleted").Inc()
 }
 
 func (m *SessionManager) SaveSession(userID int) {
@@ -659,6 +827,9 @@ func (s *UserSession) handleEvent(evt interface{}) {
 
 	switch v := evt.(type) {
 	case *events.Message:
+		if !isDirectChatJID(v.Info.Chat) {
+			return
+		}
 		eventStart := time.Now()
 		payload := MessagePayload{
 			ID:         v.Info.ID,
@@ -709,8 +880,11 @@ func (s *UserSession) handleEvent(evt interface{}) {
 					log.Printf("[media/cache] Failed to download image msg=%s: %v", piiFingerprint(msgID), err)
 					return
 				}
-				s.mediaCachePut(msgID, data)
-				log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
+				if s.mediaCachePut(msgID, data) {
+					log.Printf("[media/cache] Cached image msg=%s: %d bytes", piiFingerprint(msgID), len(data))
+				} else {
+					log.Printf("[media/cache] Skipped image msg=%s: %d bytes (cache limit)", piiFingerprint(msgID), len(data))
+				}
 			}(v.Info.ID, img)
 
 			hasContent = true
@@ -800,8 +974,11 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				}
 
 				if len(data) > 0 {
-					s.mediaCachePut(msgID, data)
-					log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					if s.mediaCachePut(msgID, data) {
+						log.Printf("[media/cache] Cached audio msg=%s: %d bytes (ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					} else {
+						log.Printf("[media/cache] Skipped audio msg=%s: %d bytes (cache limit, ptt=%v)", piiFingerprint(msgID), len(data), isPTT)
+					}
 					return
 				}
 
@@ -941,6 +1118,9 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		}
 
 	case *events.MediaRetry:
+		if !isDirectChatJID(v.ChatID) {
+			return
+		}
 		// Handle MediaRetry response from phone after SendMediaRetryReceipt
 		// This contains a new DirectPath for downloading media that was re-uploaded
 		s.handleMediaRetry(v)
@@ -1014,9 +1194,13 @@ func (s *UserSession) handleMediaRetry(evt *events.MediaRetry) {
 		return
 	}
 
-	// Cache the downloaded media
-	s.mediaCachePut(msgID, data)
-	log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
+	// Cache the downloaded media. If the hard budget is full, the normal media
+	// endpoint can still perform its direct fallback download.
+	if s.mediaCachePut(msgID, data) {
+		log.Printf("[media/retry] SUCCESS: Cached audio msg=%s: %d bytes (ptt=%v) via MediaRetry", piiFingerprint(msgID), len(data), pending.IsPTT)
+	} else {
+		log.Printf("[media/retry] Skipped audio msg=%s: %d bytes (cache limit)", piiFingerprint(msgID), len(data))
+	}
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -1025,6 +1209,11 @@ func jsonResponse(w http.ResponseWriter, data interface{}) {
 }
 
 func errorResponse(w http.ResponseWriter, status int, message string) {
+	if status >= http.StatusInternalServerError {
+		reference := fmt.Sprintf("%x", time.Now().UnixNano())
+		log.Printf("Internal request error reference=%s: %s", reference, message)
+		message = "internal server error (reference: " + reference + ")"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
@@ -1032,6 +1221,22 @@ func errorResponse(w http.ResponseWriter, status int, message string) {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
+func recoverDeletedDevice(w http.ResponseWriter, userID int, session *UserSession, err error) bool {
+	if !errors.Is(err, store.ErrDeviceDeleted) {
+		return false
+	}
+
+	if discardErr := manager.DiscardDeletedSession(userID, session); discardErr != nil {
+		errorResponse(w, http.StatusInternalServerError, discardErr.Error())
+		return true
+	}
+	jsonResponse(w, map[string]interface{}{
+		"status":  "needs_qr",
+		"user_id": userID,
+	})
+	return true
 }
 
 func createSessionHandler(w http.ResponseWriter, r *http.Request) {
@@ -1079,6 +1284,9 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		qrChan, _ := session.Client.GetQRChannel(context.Background())
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
+			if recoverDeletedDevice(w, req.UserID, session, err) {
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1111,6 +1319,9 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		sessionReconnectsTotal.Inc()
 		err := session.Client.Connect()
 		if err != nil && !strings.Contains(err.Error(), "already connected") {
+			if recoverDeletedDevice(w, req.UserID, session, err) {
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1131,11 +1342,12 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(userID)
-	if session == nil {
+	session, ok := manager.acquireSSEListener(userID)
+	if !ok {
 		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
+	defer manager.releaseSSEListener(session)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1217,60 +1429,6 @@ func deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "disconnected"})
 }
 
-func getChatsHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	ctx := context.Background()
-	var chats []ChatPayload
-
-	groups, err := session.Client.GetJoinedGroups(ctx)
-	if err == nil {
-		for _, group := range groups {
-			chats = append(chats, ChatPayload{
-				JID:     group.JID.String(),
-				Name:    group.Name,
-				IsGroup: true,
-			})
-		}
-	}
-
-	contacts, err := session.Client.GetStore().GetContacts().GetAllContacts(ctx)
-	if err == nil {
-		for jid, contact := range contacts {
-			name := contact.PushName
-			if name == "" {
-				name = contact.FullName
-			}
-			if name == "" {
-				name = jid.User
-			}
-			chats = append(chats, ChatPayload{
-				JID:     jid.String(),
-				Name:    name,
-				IsGroup: false,
-			})
-		}
-	}
-
-	jsonResponse(w, chats)
-}
-
 func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1288,18 +1446,12 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1356,18 +1508,12 @@ func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1417,18 +1563,12 @@ func setTypingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1458,11 +1598,12 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(userID)
-	if session == nil {
+	session, ok := manager.acquireSSEListener(userID)
+	if !ok {
 		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
+	defer manager.releaseSSEListener(session)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1522,18 +1663,12 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1601,18 +1736,12 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1691,18 +1820,12 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1768,18 +1891,12 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(req.ChatJID)
+	jid, err := parseDirectChatJID(req.ChatJID)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
@@ -1809,132 +1926,6 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type GroupInfoPayload struct {
-	JID          string            `json:"jid"`
-	Name         string            `json:"name"`
-	Topic        string            `json:"topic"`
-	Created      int64             `json:"created"`
-	CreatorJID   string            `json:"creator_jid"`
-	Participants []ParticipantInfo `json:"participants"`
-	IsAnnounce   bool              `json:"is_announce"`
-	IsLocked     bool              `json:"is_locked"`
-}
-
-type ParticipantInfo struct {
-	JID          string `json:"jid"`
-	IsAdmin      bool   `json:"is_admin"`
-	IsSuperAdmin bool   `json:"is_super_admin"`
-}
-
-func getGroupInfoHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	groupJID := r.URL.Query().Get("group_jid")
-	if groupJID == "" {
-		errorResponse(w, http.StatusBadRequest, "group_jid required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(groupJID)
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid jid")
-		return
-	}
-
-	info, err := session.Client.GetGroupInfo(context.Background(), jid)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
-		return
-	}
-
-	participants := make([]ParticipantInfo, 0, len(info.Participants))
-	for _, p := range info.Participants {
-		participants = append(participants, ParticipantInfo{
-			JID:          p.JID.String(),
-			IsAdmin:      p.IsAdmin,
-			IsSuperAdmin: p.IsSuperAdmin,
-		})
-	}
-
-	payload := GroupInfoPayload{
-		JID:          info.JID.String(),
-		Name:         info.Name,
-		Topic:        info.Topic,
-		Created:      info.GroupCreated.Unix(),
-		CreatorJID:   info.OwnerJID.String(),
-		Participants: participants,
-		IsAnnounce:   info.IsAnnounce,
-		IsLocked:     info.IsLocked,
-	}
-
-	jsonResponse(w, payload)
-}
-
-func listGroupParticipantsHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
-	if userID == 0 {
-		errorResponse(w, http.StatusBadRequest, "user_id required")
-		return
-	}
-
-	groupJID := r.URL.Query().Get("group_jid")
-	if groupJID == "" {
-		errorResponse(w, http.StatusBadRequest, "group_jid required")
-		return
-	}
-
-	session := manager.GetSession(userID)
-	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
-		return
-	}
-
-	jid, err := types.ParseJID(groupJID)
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid jid")
-		return
-	}
-
-	info, err := session.Client.GetGroupInfo(context.Background(), jid)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get group info: "+err.Error())
-		return
-	}
-
-	participants := make([]ParticipantInfo, 0, len(info.Participants))
-	for _, p := range info.Participants {
-		participants = append(participants, ParticipantInfo{
-			JID:          p.JID.String(),
-			IsAdmin:      p.IsAdmin,
-			IsSuperAdmin: p.IsSuperAdmin,
-		})
-	}
-
-	jsonResponse(w, participants)
-}
-
 func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1958,14 +1949,8 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := manager.GetSession(req.UserID)
+	session := operationalSession(w, req.UserID)
 	if session == nil {
-		errorResponse(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if !session.Client.IsLoggedIn() {
-		errorResponse(w, http.StatusBadRequest, "not logged in")
 		return
 	}
 
@@ -2064,6 +2049,55 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func configureDirectChatClient(client *whatsmeow.Client) {
+	// Live 1:1 delivery does not require downloading and parsing historical chats.
+	// Keep receipts enabled so the phone is not asked to resend the same history.
+	client.ManualHistorySyncDownload = true
+	client.DisableManualHistorySyncReceipt = false
+}
+
+func isDirectChatJID(jid types.JID) bool {
+	if jid.User == "" || jid.Device != 0 || jid.RawAgent != 0 || jid.Integrator != 0 {
+		return false
+	}
+	switch jid.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.LegacyUserServer:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseDirectChatJID(raw string) (types.JID, error) {
+	jid, err := types.ParseJID(raw)
+	if err != nil {
+		return types.EmptyJID, fmt.Errorf("invalid jid")
+	}
+	if !isDirectChatJID(jid) {
+		return types.EmptyJID, fmt.Errorf("direct chat jid required")
+	}
+	return jid, nil
+}
+
+func registerHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/health", instrumentHandler("health", healthHandler))
+	mux.Handle("/metrics", metricsHandler())
+	mux.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
+	mux.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
+	mux.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))
+	mux.HandleFunc("/sessions/delete", instrumentHandler("sessions_delete", deleteSessionHandler))
+	mux.HandleFunc("/sessions/save", instrumentHandler("sessions_save", saveSessionHandler))
+	mux.HandleFunc("/messages/send", instrumentHandler("messages_send", sendMessageHandler))
+	mux.HandleFunc("/messages/typing", instrumentHandler("messages_typing", setTypingHandler))
+	mux.HandleFunc("/messages/react", instrumentHandler("messages_react", sendReactionHandler))
+	mux.HandleFunc("/messages/image", instrumentHandler("messages_image", sendImageHandler))
+	mux.HandleFunc("/messages/audio", instrumentHandler("messages_audio", sendAudioHandler))
+	mux.HandleFunc("/messages/document", instrumentHandler("messages_document", sendDocumentHandler))
+	mux.HandleFunc("/messages/location", instrumentHandler("messages_location", sendLocationHandler))
+	mux.HandleFunc("/media/download", instrumentHandler("media_download", downloadMediaHandler))
+	mux.HandleFunc("/events", instrumentHandler("events", eventsHandler))
+}
+
 func main() {
 	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
 		err := sentry.Init(sentry.ClientOptions{
@@ -2090,26 +2124,10 @@ func main() {
 	encryptKey := os.Getenv("WHATSAPP_SESSION_KEY")
 
 	manager = NewSessionManager(dataDir, joBotURL, encryptKey)
+	startPprofServer()
 
-	http.HandleFunc("/health", instrumentHandler("health", healthHandler))
-	http.Handle("/metrics", metricsHandler())
-	http.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
-	http.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
-	http.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))
-	http.HandleFunc("/sessions/delete", instrumentHandler("sessions_delete", deleteSessionHandler))
-	http.HandleFunc("/sessions/save", instrumentHandler("sessions_save", saveSessionHandler))
-	http.HandleFunc("/chats", instrumentHandler("chats", getChatsHandler))
-	http.HandleFunc("/groups/info", instrumentHandler("groups_info", getGroupInfoHandler))
-	http.HandleFunc("/groups/participants", instrumentHandler("groups_participants", listGroupParticipantsHandler))
-	http.HandleFunc("/messages/send", instrumentHandler("messages_send", sendMessageHandler))
-	http.HandleFunc("/messages/typing", instrumentHandler("messages_typing", setTypingHandler))
-	http.HandleFunc("/messages/react", instrumentHandler("messages_react", sendReactionHandler))
-	http.HandleFunc("/messages/image", instrumentHandler("messages_image", sendImageHandler))
-	http.HandleFunc("/messages/audio", instrumentHandler("messages_audio", sendAudioHandler))
-	http.HandleFunc("/messages/document", instrumentHandler("messages_document", sendDocumentHandler))
-	http.HandleFunc("/messages/location", instrumentHandler("messages_location", sendLocationHandler))
-	http.HandleFunc("/media/download", instrumentHandler("media_download", downloadMediaHandler))
-	http.HandleFunc("/events", instrumentHandler("events", eventsHandler))
+	mux := http.NewServeMux()
+	registerHandlers(mux)
 
 	log.Printf("🚀 WhatsApp server starting on port %s", port)
 	log.Printf("📁 Data directory: %s", dataDir)
@@ -2120,7 +2138,7 @@ func main() {
 		log.Printf("🔐 Session persistence enabled")
 	}
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		sentry.CaptureException(err)
 		sentry.Flush(2 * time.Second)
 		log.Fatal(err)

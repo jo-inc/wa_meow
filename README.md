@@ -104,6 +104,8 @@ curl -X POST localhost:8090/messages/send \
 
 ## API Reference
 
+The bridge accepts only direct-user chat JIDs (`s.whatsapp.net`, `lid`, and legacy `c.us`). Group, broadcast/status, newsletter, bot, hosted, and interoperability JIDs are rejected.
+
 ### Sessions
 
 | Endpoint | Method | Description |
@@ -123,7 +125,6 @@ curl -X POST localhost:8090/messages/send \
 | `/messages/document` | POST | Send document (PDF, etc.) |
 | `/messages/react` | POST | React to a message with emoji |
 | `/messages/typing` | POST | Send typing indicator |
-| `/chats?user_id=X` | GET | List all chats (contacts + groups) |
 | `/events?user_id=X` | GET | SSE stream of incoming messages |
 | `/media/download` | POST | Download media from a message |
 
@@ -290,7 +291,7 @@ go install github.com/air-verse/air@latest
 
 ## Current Limitations
 
-- **No group chat support yet** - You can list groups and send messages to group JIDs, but group-specific features (mentions, replies, admin actions) are not implemented
+- **Direct chats only** - Groups, broadcasts/status, newsletters, bots, hosted/interoperability chats, and historical chat synchronization are intentionally disabled
 - **No message history** - Only receives messages while connected
 
 ## Credits

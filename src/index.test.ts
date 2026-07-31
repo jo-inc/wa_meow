@@ -15,8 +15,6 @@ vi.mock("./client.js", () => {
       sendLocation: vi.fn(),
       setTyping: vi.fn(),
       sendReaction: vi.fn(),
-      getGroupInfo: vi.fn(),
-      getGroupParticipants: vi.fn(),
       createEventSource: vi.fn(),
       createQREventSource: vi.fn(),
     })),
@@ -74,25 +72,6 @@ describe("wa_meow plugin", () => {
         accountId: string
       ): Promise<{ connected: boolean; loggedIn: boolean; phone?: string }>;
     };
-    groups?: {
-      getGroupInfo(ctx: {
-        accountId: string;
-        groupId: string;
-      }): Promise<{
-        id: string;
-        name: string;
-        topic?: string;
-        createdAt?: number;
-        creatorId?: string;
-        participantCount: number;
-        isAnnounceOnly: boolean;
-        isLocked: boolean;
-      }>;
-      listParticipants(ctx: {
-        accountId: string;
-        groupId: string;
-      }): Promise<{ id: string; isAdmin: boolean; isSuperAdmin: boolean }[]>;
-    };
   };
 
   let mockClientInstance: ReturnType<typeof vi.fn> & {
@@ -101,8 +80,6 @@ describe("wa_meow plugin", () => {
     getStatus: ReturnType<typeof vi.fn>;
     createSession: ReturnType<typeof vi.fn>;
     deleteSession: ReturnType<typeof vi.fn>;
-    getGroupInfo: ReturnType<typeof vi.fn>;
-    getGroupParticipants: ReturnType<typeof vi.fn>;
     createEventSource: ReturnType<typeof vi.fn>;
   };
 
@@ -270,7 +247,7 @@ describe("wa_meow plugin", () => {
     describe("capabilities", () => {
       it("should have correct capabilities", () => {
         expect(registeredPlugin.capabilities).toEqual({
-          chatTypes: ["dm", "group"],
+          chatTypes: ["dm"],
           supportsMedia: true,
           supportsThreads: false,
           supportsReactions: true,
@@ -439,79 +416,6 @@ describe("wa_meow plugin", () => {
           connected: false,
           loggedIn: false,
         });
-      });
-    });
-
-    describe("groups.getGroupInfo()", () => {
-      it("should return group info from client", async () => {
-        mockClientInstance.getGroupInfo.mockResolvedValue({
-          jid: "123@g.us",
-          name: "Test Group",
-          topic: "Topic",
-          created: 1600000000,
-          creator_jid: "111@s.whatsapp.net",
-          participants: [{ jid: "111@s.whatsapp.net" }, { jid: "222@s.whatsapp.net" }],
-          is_announce: true,
-          is_locked: false,
-        });
-
-        const info = await registeredPlugin.groups!.getGroupInfo({
-          accountId: "main",
-          groupId: "123@g.us",
-        });
-
-        expect(mockClientInstance.getGroupInfo).toHaveBeenCalledWith(123, "123@g.us");
-        expect(info).toEqual({
-          id: "123@g.us",
-          name: "Test Group",
-          topic: "Topic",
-          createdAt: 1600000000,
-          creatorId: "111@s.whatsapp.net",
-          participantCount: 2,
-          isAnnounceOnly: true,
-          isLocked: false,
-        });
-      });
-
-      it("should throw for unknown account", async () => {
-        await expect(
-          registeredPlugin.groups!.getGroupInfo({
-            accountId: "unknown",
-            groupId: "123@g.us",
-          })
-        ).rejects.toThrow("Unknown account: unknown");
-      });
-    });
-
-    describe("groups.listParticipants()", () => {
-      it("should return participants from client", async () => {
-        mockClientInstance.getGroupParticipants.mockResolvedValue([
-          { jid: "111@s.whatsapp.net", is_admin: true, is_super_admin: true },
-          { jid: "222@s.whatsapp.net", is_admin: false, is_super_admin: false },
-        ]);
-
-        const participants = await registeredPlugin.groups!.listParticipants({
-          accountId: "main",
-          groupId: "123@g.us",
-        });
-
-        expect(mockClientInstance.getGroupParticipants).toHaveBeenCalledWith(
-          123,
-          "123@g.us"
-        );
-        expect(participants).toEqual([
-          { id: "111@s.whatsapp.net", isAdmin: true, isSuperAdmin: true },
-          { id: "222@s.whatsapp.net", isAdmin: false, isSuperAdmin: false },
-        ]);
-      });
-
-      it("should throw for unknown account", async () => {
-        await expect(
-          registeredPlugin.groups!.listParticipants({
-            accountId: "unknown",
-            groupId: "123@g.us",
-          })
-        ).rejects.toThrow("Unknown account: unknown");
       });
     });
 

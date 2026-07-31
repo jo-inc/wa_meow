@@ -10,32 +10,9 @@ export interface SessionStatus {
   phone?: string;
 }
 
-export interface Chat {
-  jid: string;
-  name: string;
-  is_group: boolean;
-}
-
 export interface SendMessageResult {
   id: string;
   timestamp: number;
-}
-
-export interface GroupInfo {
-  jid: string;
-  name: string;
-  topic: string;
-  created: number;
-  creator_jid: string;
-  participants: Participant[];
-  is_announce: boolean;
-  is_locked: boolean;
-}
-
-export interface Participant {
-  jid: string;
-  is_admin: boolean;
-  is_super_admin: boolean;
 }
 
 export interface MessageEvent {
@@ -100,10 +77,6 @@ export class WhatsAppClient {
     return this.request(`/sessions/delete?user_id=${userId}`, {
       method: "DELETE",
     });
-  }
-
-  async getChats(userId: number): Promise<Chat[]> {
-    return this.request(`/chats?user_id=${userId}`);
   }
 
   async sendMessage(
@@ -189,14 +162,6 @@ export class WhatsAppClient {
         emoji,
       }),
     });
-  }
-
-  async getGroupInfo(userId: number, groupJid: string): Promise<GroupInfo> {
-    return this.request(`/groups/info?user_id=${userId}&group_jid=${encodeURIComponent(groupJid)}`);
-  }
-
-  async getGroupParticipants(userId: number, groupJid: string): Promise<Participant[]> {
-    return this.request(`/groups/participants?user_id=${userId}&group_jid=${encodeURIComponent(groupJid)}`);
   }
 
   /**

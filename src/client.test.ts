@@ -357,52 +357,6 @@ describe("WhatsAppClient", () => {
     });
   });
 
-  describe("getGroupInfo()", () => {
-    it("should call /groups/info with encoded groupJid", async () => {
-      const groupInfo = {
-        jid: "123456789@g.us",
-        name: "Test Group",
-        topic: "Group topic",
-        created: 1600000000,
-        creator_jid: "111@s.whatsapp.net",
-        participants: [],
-        is_announce: false,
-        is_locked: false,
-      };
-      mockResponse(groupInfo);
-
-      const result = await client.getGroupInfo(123, "123456789@g.us");
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        `${serverUrl}/groups/info?user_id=123&group_jid=123456789%40g.us`,
-        expect.objectContaining({
-          headers: { "Content-Type": "application/json" },
-        })
-      );
-      expect(result).toEqual(groupInfo);
-    });
-  });
-
-  describe("getGroupParticipants()", () => {
-    it("should call /groups/participants", async () => {
-      const participants = [
-        { jid: "111@s.whatsapp.net", is_admin: true, is_super_admin: true },
-        { jid: "222@s.whatsapp.net", is_admin: false, is_super_admin: false },
-      ];
-      mockResponse(participants);
-
-      const result = await client.getGroupParticipants(123, "123456789@g.us");
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        `${serverUrl}/groups/participants?user_id=123&group_jid=123456789%40g.us`,
-        expect.objectContaining({
-          headers: { "Content-Type": "application/json" },
-        })
-      );
-      expect(result).toEqual(participants);
-    });
-  });
-
   describe("error handling", () => {
     it("should throw error message from response", async () => {
       mockErrorResponse("Session not found", 404);
@@ -418,26 +372,6 @@ describe("WhatsAppClient", () => {
       });
 
       await expect(client.health()).rejects.toThrow("HTTP 500");
-    });
-  });
-
-  describe("getChats()", () => {
-    it("should call /chats with user_id", async () => {
-      const chats = [
-        { jid: "111@s.whatsapp.net", name: "Alice", is_group: false },
-        { jid: "123@g.us", name: "Team", is_group: true },
-      ];
-      mockResponse(chats);
-
-      const result = await client.getChats(123);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        `${serverUrl}/chats?user_id=123`,
-        expect.objectContaining({
-          headers: { "Content-Type": "application/json" },
-        })
-      );
-      expect(result).toEqual(chats);
     });
   });
 

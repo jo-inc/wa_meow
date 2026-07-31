@@ -22,12 +22,12 @@ import (
 )
 
 var (
-	client         *whatsmeow.Client
-	container      *sqlstore.Container
-	eventCallback  func(string)
-	mu             sync.Mutex
-	qrCodeChannel  chan string
-	loginDone      chan bool
+	client        *whatsmeow.Client
+	container     *sqlstore.Container
+	eventCallback func(string)
+	mu            sync.Mutex
+	qrCodeChannel chan string
+	loginDone     chan bool
 )
 
 type ChatJSON struct {
@@ -38,13 +38,13 @@ type ChatJSON struct {
 }
 
 type MessageJSON struct {
-	ID        string `json:"id"`
-	ChatJID   string `json:"chat_jid"`
-	SenderJID string `json:"sender_jid"`
+	ID         string `json:"id"`
+	ChatJID    string `json:"chat_jid"`
+	SenderJID  string `json:"sender_jid"`
 	SenderName string `json:"sender_name"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-	IsFromMe  bool   `json:"is_from_me"`
+	Text       string `json:"text"`
+	Timestamp  int64  `json:"timestamp"`
+	IsFromMe   bool   `json:"is_from_me"`
 }
 
 type EventJSON struct {
@@ -59,7 +59,7 @@ func WhatsAppInit(dbPath *C.char) *C.char {
 
 	ctx := context.Background()
 	dbPathGo := C.GoString(dbPath)
-	
+
 	dbLog := waLog.Stdout("Database", "ERROR", true)
 	var err error
 	container, err = sqlstore.New(ctx, "sqlite3", "file:"+dbPathGo+"?_foreign_keys=on", dbLog)

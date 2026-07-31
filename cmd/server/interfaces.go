@@ -32,15 +32,12 @@ type WhatsAppClient interface {
 	// DownloadAndDecrypt downloads from URL directly without modifying parameters (for mms3 URLs)
 	DownloadAndDecrypt(ctx context.Context, url string, mediaKey []byte, appInfo whatsmeow.MediaType, fileLength int, fileEncSHA256, fileSHA256 []byte) ([]byte, error)
 
-	// Groups
-	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
-	GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error)
-
 	// Store access
 	GetStore() DeviceStore
 
 	// Event handling
 	AddEventHandler(handler whatsmeow.EventHandler) uint32
+	RemoveEventHandlers()
 
 	// Media retry - request phone to re-upload media
 	SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error
@@ -49,12 +46,6 @@ type WhatsAppClient interface {
 // DeviceStore abstracts access to device/store information
 type DeviceStore interface {
 	GetID() *types.JID
-	GetContacts() ContactStore
-}
-
-// ContactStore abstracts access to contacts
-type ContactStore interface {
-	GetAllContacts(ctx context.Context) (map[types.JID]types.ContactInfo, error)
 }
 
 // realClientWrapper wraps the real whatsmeow.Client to implement WhatsAppClient
@@ -98,14 +89,6 @@ func (w *realClientWrapper) SendChatPresence(ctx context.Context, jid types.JID,
 	return w.client.SendChatPresence(ctx, jid, presence, media)
 }
 
-func (w *realClientWrapper) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error) {
-	return w.client.GetJoinedGroups(ctx)
-}
-
-func (w *realClientWrapper) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
-	return w.client.GetGroupInfo(ctx, jid)
-}
-
 func (w *realClientWrapper) Upload(ctx context.Context, plaintext []byte, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	return w.client.Upload(ctx, plaintext, appInfo)
 }
@@ -126,6 +109,10 @@ func (w *realClientWrapper) AddEventHandler(handler whatsmeow.EventHandler) uint
 	return w.client.AddEventHandler(handler)
 }
 
+func (w *realClientWrapper) RemoveEventHandlers() {
+	w.client.RemoveEventHandlers()
+}
+
 func (w *realClientWrapper) SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error {
 	return w.client.SendMediaRetryReceipt(ctx, message, mediaKey)
 }
@@ -141,8 +128,4 @@ type realDeviceStoreWrapper struct {
 
 func (w *realDeviceStoreWrapper) GetID() *types.JID {
 	return w.store.ID
-}
-
-func (w *realDeviceStoreWrapper) GetContacts() ContactStore {
-	return w.store.Contacts
 }
