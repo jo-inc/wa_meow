@@ -60,6 +60,8 @@ type SessionManager struct {
 	joBotInternalToken string
 	encryptKey         []byte
 	unloadGrace        time.Duration
+	connectReadyWait   time.Duration
+	connectReadyPoll   time.Duration
 	loadSession        func(int) (*UserSession, error)
 }
 
@@ -83,6 +85,8 @@ const (
 	mediaCacheMaxEntryBytes  = 25 * 1024 * 1024
 	mediaCacheEvictInterval  = 30 * time.Second
 	defaultUnloadGrace       = 5 * time.Minute
+	defaultConnectReadyWait  = 5 * time.Second
+	defaultConnectReadyPoll  = 50 * time.Millisecond
 )
 
 // mediaCacheBudget is shared by every session in the process. Its mutex is the
@@ -114,6 +118,7 @@ type UserSession struct {
 	// Pending media retries: message ID -> pending retry info
 	PendingRetries   map[string]*PendingMediaRetry
 	PendingRetriesMu sync.RWMutex
+	SendMu           sync.Mutex
 
 	lifecycleMu     sync.Mutex
 	sseListeners    int
@@ -464,6 +469,8 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 		joBotInternalToken: strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
 		encryptKey:         encryptKey,
 		unloadGrace:        configuredUnloadGrace(),
+		connectReadyWait:   defaultConnectReadyWait,
+		connectReadyPoll:   defaultConnectReadyPoll,
 	}
 	manager.loadSession = manager.GetOrCreateSession
 	return manager
@@ -641,6 +648,16 @@ func (m *SessionManager) deleteSessionFromJoBot(userID int) error {
 	return nil
 }
 
+func (m *SessionManager) restoreSessionIfMissing(userID int) error {
+	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
+	if _, err := os.Stat(dbPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return m.fetchSessionFromJoBot(userID)
+}
+
 func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -651,8 +668,11 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 		return session, nil
 	}
 
-	// Try to restore session from jo_bot
-	m.fetchSessionFromJoBot(userID)
+	// The mounted-volume database is authoritative after an idle unload. The
+	// backend copy is a bootstrap backup and must not overwrite newer app state.
+	if err := m.restoreSessionIfMissing(userID); err != nil {
+		return nil, fmt.Errorf("failed to restore session: %w", err)
+	}
 
 	ctx := context.Background()
 	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
@@ -728,6 +748,26 @@ var (
 	errSessionNotLoggedIn = errors.New("not logged in")
 )
 
+func (m *SessionManager) waitForLogin(session *UserSession) bool {
+	if session.Client.IsLoggedIn() {
+		return true
+	}
+	timer := time.NewTimer(m.connectReadyWait)
+	defer timer.Stop()
+	ticker := time.NewTicker(m.connectReadyPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if session.Client.IsLoggedIn() {
+				return true
+			}
+		case <-timer.C:
+			return session.Client.IsLoggedIn()
+		}
+	}
+}
+
 func (m *SessionManager) getOperationalSession(userID int) (*UserSession, error) {
 	session := m.GetSession(userID)
 	if session == nil {
@@ -753,7 +793,7 @@ func (m *SessionManager) getOperationalSession(userID int) (*UserSession, error)
 			return nil, err
 		}
 	}
-	if !session.Client.IsLoggedIn() {
+	if !m.waitForLogin(session) {
 		return nil, errSessionNotLoggedIn
 	}
 	return session, nil
@@ -1429,6 +1469,69 @@ func deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "disconnected"})
 }
 
+func stableDeliveryMessageID(userID int, deliveryKey string) types.MessageID {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", userID, deliveryKey)))
+	return types.MessageID(strings.ToUpper(fmt.Sprintf("%x", sum[:10])))
+}
+
+type deliveryReceipt struct {
+	ID        string `json:"id"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (m *SessionManager) deliveryReceiptPath(userID int, deliveryKey string) string {
+	sum := sha256.Sum256([]byte(deliveryKey))
+	return filepath.Join(m.dataDir, "delivery_receipts", fmt.Sprintf("%d", userID), fmt.Sprintf("%x.json", sum))
+}
+
+func (m *SessionManager) readDeliveryReceipt(userID int, deliveryKey string) (*deliveryReceipt, error) {
+	data, err := os.ReadFile(m.deliveryReceiptPath(userID, deliveryKey))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var receipt deliveryReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return nil, err
+	}
+	return &receipt, nil
+}
+
+func (m *SessionManager) writeDeliveryReceipt(userID int, deliveryKey string, receipt deliveryReceipt) error {
+	path := m.deliveryReceiptPath(userID, deliveryKey)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".receipt-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1436,13 +1539,18 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		UserID  int    `json:"user_id"`
-		ChatJID string `json:"chat_jid"`
-		Text    string `json:"text"`
-		ReplyTo string `json:"reply_to,omitempty"` // Optional message ID to reply to
+		UserID      int    `json:"user_id"`
+		ChatJID     string `json:"chat_jid"`
+		Text        string `json:"text"`
+		ReplyTo     string `json:"reply_to,omitempty"`     // Optional message ID to reply to
+		DeliveryKey string `json:"delivery_key,omitempty"` // Stable caller key for retry deduplication
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if len(req.DeliveryKey) > 200 {
+		errorResponse(w, http.StatusBadRequest, "delivery_key too long")
 		return
 	}
 
@@ -1455,6 +1563,22 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid jid")
 		return
+	}
+
+	session.SendMu.Lock()
+	defer session.SendMu.Unlock()
+	if req.DeliveryKey != "" {
+		receipt, err := manager.readDeliveryReceipt(req.UserID, req.DeliveryKey)
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to read delivery receipt")
+			return
+		}
+		if receipt != nil {
+			jsonResponse(w, map[string]interface{}{
+				"id": receipt.ID, "timestamp": receipt.Timestamp, "deduplicated": true,
+			})
+			return
+		}
 	}
 
 	var msg *waE2E.Message
@@ -1477,11 +1601,27 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendStart := time.Now()
-	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
+	var resp whatsmeow.SendResponse
+	if req.DeliveryKey != "" {
+		resp, err = session.Client.SendMessage(
+			context.Background(), jid, msg,
+			whatsmeow.SendRequestExtra{ID: stableDeliveryMessageID(req.UserID, req.DeliveryKey)},
+		)
+	} else {
+		resp, err = session.Client.SendMessage(context.Background(), jid, msg)
+	}
 	observeMessageProcessing("text", sendStart)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if req.DeliveryKey != "" {
+		if err := manager.writeDeliveryReceipt(req.UserID, req.DeliveryKey, deliveryReceipt{
+			ID: resp.ID, Timestamp: resp.Timestamp.Unix(),
+		}); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to persist delivery receipt")
+			return
+		}
 	}
 
 	messagesTotal.WithLabelValues("outbound", "text").Inc()

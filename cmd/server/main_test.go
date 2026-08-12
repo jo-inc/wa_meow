@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,7 +25,10 @@ import (
 // Test helper: create a session manager with a mock client injected
 func setupTestManager(t *testing.T) *SessionManager {
 	t.Helper()
-	return NewSessionManager(t.TempDir(), "", "")
+	manager := NewSessionManager(t.TempDir(), "", "")
+	manager.connectReadyWait = 20 * time.Millisecond
+	manager.connectReadyPoll = time.Millisecond
+	return manager
 }
 
 // Test helper: inject a mock session into the manager
@@ -83,6 +88,56 @@ func TestNewSessionManager(t *testing.T) {
 		m := NewSessionManager("/tmp/test", "", key)
 		if m.encryptKey != nil {
 			t.Error("expected nil encryption key for wrong length")
+		}
+	})
+}
+
+func TestRestoreSessionIfMissing(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	backup := []byte("backup database")
+	requests := atomic.Int32{}
+
+	var encrypted string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		json.NewEncoder(w).Encode(map[string]string{"data": encrypted})
+	}))
+	defer server.Close()
+
+	t.Run("preserves an existing local database", func(t *testing.T) {
+		manager := NewSessionManager(t.TempDir(), server.URL, key)
+		encrypted, _ = manager.encrypt(backup)
+		path := filepath.Join(manager.dataDir, "user_41.db")
+		local := []byte("current local database")
+		if err := os.WriteFile(path, local, 0600); err != nil {
+			t.Fatal(err)
+		}
+		before := requests.Load()
+		if err := manager.restoreSessionIfMissing(41); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(path)
+		if !bytes.Equal(got, local) {
+			t.Fatalf("existing database was overwritten: %q", got)
+		}
+		if requests.Load() != before {
+			t.Fatal("backend restore was requested for an existing database")
+		}
+	})
+
+	t.Run("restores a missing local database", func(t *testing.T) {
+		manager := NewSessionManager(t.TempDir(), server.URL, key)
+		encrypted, _ = manager.encrypt(backup)
+		before := requests.Load()
+		if err := manager.restoreSessionIfMissing(42); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(manager.dataDir, "user_42.db"))
+		if !bytes.Equal(got, backup) {
+			t.Fatalf("expected restored backup, got %q", got)
+		}
+		if requests.Load() != before+1 {
+			t.Fatal("expected one backend restore request")
 		}
 	})
 }
@@ -716,6 +771,72 @@ func TestSendMessageHandler(t *testing.T) {
 		calls := mock.GetCallsByMethod("SendMessage")
 		if len(calls) != 1 {
 			t.Errorf("expected 1 SendMessage call, got %d", len(calls))
+		}
+	})
+
+	t.Run("waits for reconnect login readiness", func(t *testing.T) {
+		manager = setupTestManager(t)
+		manager.connectReadyWait = 200 * time.Millisecond
+		mock := NewLoggedInMockClient()
+		mock.SetConnected(false)
+		mock.SetLoggedIn(false)
+		injectMockSession(manager, 605, mock)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			mock.SetLoggedIn(true)
+		}()
+
+		body := `{"user_id":605,"chat_jid":"1234567890@s.whatsapp.net","text":"hello"}`
+		req := httptest.NewRequest(http.MethodPost, "/messages/send", bytes.NewBufferString(body))
+		w := httptest.NewRecorder()
+		sendMessageHandler(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 after login became ready, got %d: %s", w.Code, w.Body.String())
+		}
+		if calls := mock.GetCallsByMethod("Connect"); len(calls) != 1 {
+			t.Fatalf("expected one reconnect, got %d", len(calls))
+		}
+	})
+
+	t.Run("deduplicates a stable delivery key after manager restart", func(t *testing.T) {
+		dataDir := t.TempDir()
+		manager = NewSessionManager(dataDir, "", "")
+		manager.connectReadyWait = 20 * time.Millisecond
+		manager.connectReadyPoll = time.Millisecond
+		firstClient := NewLoggedInMockClient()
+		injectMockSession(manager, 606, firstClient)
+		body := `{"user_id":606,"chat_jid":"1234567890@s.whatsapp.net","text":"hello","delivery_key":"cron-v1-test"}`
+
+		first := httptest.NewRecorder()
+		sendMessageHandler(first, httptest.NewRequest(http.MethodPost, "/messages/send", bytes.NewBufferString(body)))
+		if first.Code != http.StatusOK {
+			t.Fatalf("first send failed: %d: %s", first.Code, first.Body.String())
+		}
+		calls := firstClient.GetCallsByMethod("SendMessage")
+		if len(calls) != 1 {
+			t.Fatalf("expected one provider send, got %d", len(calls))
+		}
+		extra := calls[0].Args[3].([]whatsmeow.SendRequestExtra)
+		if len(extra) != 1 || extra[0].ID != stableDeliveryMessageID(606, "cron-v1-test") {
+			t.Fatalf("provider message ID was not stable: %#v", extra)
+		}
+
+		manager = NewSessionManager(dataDir, "", "")
+		secondClient := NewLoggedInMockClient()
+		injectMockSession(manager, 606, secondClient)
+		second := httptest.NewRecorder()
+		sendMessageHandler(second, httptest.NewRequest(http.MethodPost, "/messages/send", bytes.NewBufferString(body)))
+		if second.Code != http.StatusOK {
+			t.Fatalf("duplicate request failed: %d: %s", second.Code, second.Body.String())
+		}
+		if calls := secondClient.GetCallsByMethod("SendMessage"); len(calls) != 0 {
+			t.Fatalf("expected no duplicate provider send, got %d", len(calls))
+		}
+		var response map[string]interface{}
+		json.NewDecoder(second.Body).Decode(&response)
+		if response["deduplicated"] != true {
+			t.Fatalf("expected deduplicated response, got %#v", response)
 		}
 	})
 
