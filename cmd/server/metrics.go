@@ -105,7 +105,7 @@ func instrumentHandler(endpoint string, next http.HandlerFunc) http.HandlerFunc 
 			webhookRequestsTotal.WithLabelValues("error").Inc()
 			apiErrorsTotal.WithLabelValues(endpoint).Inc()
 			if rw.status >= http.StatusInternalServerError {
-				captureSanitizedSentrySignal("api_5xx_" + endpoint)
+				captureSanitizedSentrySignal("api_5xx_"+endpoint, nil)
 			}
 		} else {
 			webhookRequestsTotal.WithLabelValues("success").Inc()

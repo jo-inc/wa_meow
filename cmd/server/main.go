@@ -319,7 +319,11 @@ var socketEOFBurstState = struct {
 	lastReported time.Time
 }{}
 
-func captureSanitizedSentrySignal(signal string) {
+func captureSanitizedSentrySignal(signal string, session *UserSession) {
+	captureSanitizedSentrySignalWithHub(sentry.CurrentHub(), signal, session)
+}
+
+func captureSanitizedSentrySignalWithHub(hub *sentry.Hub, signal string, session *UserSession) {
 	now := time.Now()
 	sentrySignalState.Lock()
 	if last := sentrySignalState.lastSent[signal]; now.Sub(last) < sentrySignalCooldown {
@@ -329,10 +333,13 @@ func captureSanitizedSentrySignal(signal string) {
 	sentrySignalState.lastSent[signal] = now
 	sentrySignalState.Unlock()
 
-	sentry.WithScope(func(scope *sentry.Scope) {
+	hub.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("component", "whatsapp_bridge")
 		scope.SetTag("signal", signal)
-		sentry.CaptureMessage("WhatsApp bridge reliability signal")
+		if session != nil {
+			scope.SetTag("session_hash", piiFingerprint(fmt.Sprint(session.UserID)))
+		}
+		hub.CaptureMessage("WhatsApp bridge reliability signal")
 	})
 }
 
@@ -355,21 +362,21 @@ func isSocketEOFBurst(now time.Time) bool {
 	return true
 }
 
-func reportClientErrorToSentry(reason string) {
+func reportClientErrorToSentry(reason string, session *UserSession) {
 	switch reason {
 	case "app_state_lthash", "reconnect_failed":
-		captureSanitizedSentrySignal(reason)
+		captureSanitizedSentrySignal(reason, session)
 	case "socket_eof":
 		if isSocketEOFBurst(time.Now()) {
-			captureSanitizedSentrySignal("socket_eof_burst")
+			captureSanitizedSentrySignal("socket_eof_burst", session)
 		}
 	}
 }
 
-func reportTransportSignalToSentry(signal string) {
+func reportTransportSignalToSentry(signal string, session *UserSession) {
 	switch signal {
 	case "logged_out", "stream_replaced", "connect_failure":
-		captureSanitizedSentrySignal(signal)
+		captureSanitizedSentrySignal(signal, session)
 	}
 }
 
@@ -416,7 +423,7 @@ func (l *telemetryLogger) Errorf(msg string, args ...interface{}) {
 	if reason := classifyWhatsAppClientError(formatted); reason != "" {
 		clientErrorsTotal.WithLabelValues(reason).Inc()
 		l.telemetry.track(reason)
-		reportClientErrorToSentry(reason)
+		reportClientErrorToSentry(reason, l.telemetry.session)
 	}
 	l.delegate.Errorf("%s", formatted)
 }
@@ -862,7 +869,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 	if signal := whatsappTransportSignal(evt); signal != "" {
 		transportSignalsTotal.WithLabelValues(signal).Inc()
 		log.Printf("[whatsapp/transport] signal=%s session=%s", signal, piiFingerprint(fmt.Sprint(s.UserID)))
-		reportTransportSignalToSentry(signal)
+		reportTransportSignalToSentry(signal, s)
 	}
 
 	switch v := evt.(type) {

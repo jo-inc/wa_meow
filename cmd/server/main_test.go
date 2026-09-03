@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sentry "github.com/getsentry/sentry-go"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
@@ -233,6 +234,47 @@ func TestPIIPresence(t *testing.T) {
 	got := piiPresence("/v/t62.7117-24/signed-token")
 	if !strings.Contains(got, "present(hash=") || strings.Contains(got, "signed-token") {
 		t.Fatalf("expected redacted presence summary, got %q", got)
+	}
+}
+
+func TestReliabilitySignalAddsStableSessionHashWithoutPII(t *testing.T) {
+	transport := &sentry.MockTransport{}
+	client, err := sentry.NewClient(sentry.ClientOptions{
+		Dsn:       "http://key@example.invalid/1",
+		Transport: transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentrySignalState.Lock()
+	sentrySignalState.lastSent = make(map[string]time.Time)
+	sentrySignalState.Unlock()
+
+	userID := 123456
+	hub := sentry.NewHub(client, sentry.NewScope())
+	captureSanitizedSentrySignalWithHub(hub, "app_state_lthash", &UserSession{UserID: userID})
+
+	events := transport.Events()
+	if len(events) != 1 {
+		t.Fatalf("expected one Sentry event, got %d", len(events))
+	}
+	event := events[0]
+	if event.Message != "WhatsApp bridge reliability signal" {
+		t.Fatalf("unexpected message %q", event.Message)
+	}
+	if event.Tags["component"] != "whatsapp_bridge" || event.Tags["signal"] != "app_state_lthash" {
+		t.Fatalf("missing existing reliability tags: %#v", event.Tags)
+	}
+	if got, want := event.Tags["session_hash"], piiFingerprint("123456"); got != want {
+		t.Fatalf("session_hash = %q, want %q", got, want)
+	}
+	serialized, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), "123456") {
+		t.Fatal("Sentry event contains raw user ID")
 	}
 }
 
