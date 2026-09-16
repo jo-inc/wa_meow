@@ -313,11 +313,14 @@ var sentrySignalState = struct {
 	lastSent map[string]time.Time
 }{lastSent: make(map[string]time.Time)}
 
-var socketEOFBurstState = struct {
+var socketReadErrorBurstState = struct {
 	sync.Mutex
-	occurred     []time.Time
-	lastReported time.Time
-}{}
+	occurred     map[string][]time.Time
+	lastReported map[string]time.Time
+}{
+	occurred:     make(map[string][]time.Time),
+	lastReported: make(map[string]time.Time),
+}
 
 func captureSanitizedSentrySignal(signal string, session *UserSession) {
 	captureSanitizedSentrySignalWithHub(sentry.CurrentHub(), signal, session)
@@ -343,22 +346,22 @@ func captureSanitizedSentrySignalWithHub(hub *sentry.Hub, signal string, session
 	})
 }
 
-func isSocketEOFBurst(now time.Time) bool {
-	socketEOFBurstState.Lock()
-	defer socketEOFBurstState.Unlock()
+func isSocketReadErrorBurst(reason string, now time.Time) bool {
+	socketReadErrorBurstState.Lock()
+	defer socketReadErrorBurstState.Unlock()
 
 	cutoff := now.Add(-5 * time.Minute)
-	kept := socketEOFBurstState.occurred[:0]
-	for _, occurred := range socketEOFBurstState.occurred {
+	kept := socketReadErrorBurstState.occurred[reason][:0]
+	for _, occurred := range socketReadErrorBurstState.occurred[reason] {
 		if occurred.After(cutoff) {
 			kept = append(kept, occurred)
 		}
 	}
-	socketEOFBurstState.occurred = append(kept, now)
-	if len(socketEOFBurstState.occurred) < 3 || now.Sub(socketEOFBurstState.lastReported) < sentrySignalCooldown {
+	socketReadErrorBurstState.occurred[reason] = append(kept, now)
+	if len(socketReadErrorBurstState.occurred[reason]) < 3 || now.Sub(socketReadErrorBurstState.lastReported[reason]) < sentrySignalCooldown {
 		return false
 	}
-	socketEOFBurstState.lastReported = now
+	socketReadErrorBurstState.lastReported[reason] = now
 	return true
 }
 
@@ -366,9 +369,9 @@ func reportClientErrorToSentry(reason string, session *UserSession) {
 	switch reason {
 	case "app_state_lthash", "reconnect_failed":
 		captureSanitizedSentrySignal(reason, session)
-	case "socket_eof":
-		if isSocketEOFBurst(time.Now()) {
-			captureSanitizedSentrySignal("socket_eof_burst", session)
+	case "socket_eof", "socket_connection_reset":
+		if isSocketReadErrorBurst(reason, time.Now()) {
+			captureSanitizedSentrySignal(reason+"_burst", session)
 		}
 	}
 }
@@ -399,6 +402,8 @@ func classifyWhatsAppClientError(message string) string {
 		return "app_state_lthash"
 	case strings.Contains(message, "Error reconnecting after autoreconnect sleep"):
 		return "reconnect_failed"
+	case strings.Contains(message, "Error reading from websocket") && strings.Contains(message, "connection reset by peer"):
+		return "socket_connection_reset"
 	case strings.Contains(message, "Error reading from websocket") && strings.Contains(message, "EOF"):
 		return "socket_eof"
 	default:

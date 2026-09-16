@@ -283,6 +283,7 @@ func TestClassifyWhatsAppClientError(t *testing.T) {
 		message string
 		want    string
 	}{
+		{"Error reading from websocket: read tcp: connection reset by peer", "socket_connection_reset"},
 		{"Error reading from websocket: failed to read frame header: EOF", "socket_eof"},
 		{"Failed to sync app state: mismatching LTHash", "app_state_lthash"},
 		{"Error reconnecting after autoreconnect sleep: network unavailable", "reconnect_failed"},
@@ -295,21 +296,27 @@ func TestClassifyWhatsAppClientError(t *testing.T) {
 	}
 }
 
-func TestSocketEOFBurst(t *testing.T) {
-	socketEOFBurstState.Lock()
-	socketEOFBurstState.occurred = nil
-	socketEOFBurstState.lastReported = time.Time{}
-	socketEOFBurstState.Unlock()
+func TestSocketReadErrorBurst(t *testing.T) {
+	socketReadErrorBurstState.Lock()
+	socketReadErrorBurstState.occurred = make(map[string][]time.Time)
+	socketReadErrorBurstState.lastReported = make(map[string]time.Time)
+	socketReadErrorBurstState.Unlock()
 
 	now := time.Now()
-	if isSocketEOFBurst(now) || isSocketEOFBurst(now.Add(time.Second)) {
+	if isSocketReadErrorBurst("socket_eof", now) || isSocketReadErrorBurst("socket_eof", now.Add(time.Second)) {
 		t.Fatal("expected fewer than three EOFs not to be a burst")
 	}
-	if !isSocketEOFBurst(now.Add(2 * time.Second)) {
+	if !isSocketReadErrorBurst("socket_eof", now.Add(2*time.Second)) {
 		t.Fatal("expected three EOFs within five minutes to be a burst")
 	}
-	if isSocketEOFBurst(now.Add(3 * time.Second)) {
+	if isSocketReadErrorBurst("socket_eof", now.Add(3*time.Second)) {
 		t.Fatal("expected burst reporting cooldown")
+	}
+	if isSocketReadErrorBurst("socket_connection_reset", now) || isSocketReadErrorBurst("socket_connection_reset", now.Add(time.Second)) {
+		t.Fatal("expected fewer than three connection resets not to be a burst")
+	}
+	if !isSocketReadErrorBurst("socket_connection_reset", now.Add(2*time.Second)) {
+		t.Fatal("expected three connection resets within five minutes to be a burst")
 	}
 }
 
