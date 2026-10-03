@@ -91,6 +91,11 @@ var (
 		Name: "jo_whatsapp_media_cache_evictions_total",
 		Help: "Media cache evictions by reason",
 	}, []string{"reason"})
+
+	sharedInboxPersistenceFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "jo_whatsapp_shared_inbox_failures_total",
+		Help: "Shared-number durable inbox persistence and notification failures",
+	}, []string{"reason"})
 )
 
 func metricsHandler() http.Handler {

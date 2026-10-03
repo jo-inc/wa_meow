@@ -14,6 +14,24 @@ export WHATSAPP_SESSION_KEY="${WHATSAPP_SESSION_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODk
 mkdir -p "$DATA_DIR"
 mkdir -p "./tmp"
 
+# Reuse the private local bridge/backend credential across manual restarts.
+if [ -z "${JO_WHATSAPP_INTERNAL_TOKEN:-}" ] && [ -s "$DATA_DIR/.internal-token" ]; then
+  export JO_WHATSAPP_INTERNAL_TOKEN="$(<"$DATA_DIR/.internal-token")"
+fi
+
+# Keep local admin registration enabled without a shared/default credential.
+# The generated bearer secret stays in a mode-0600 file under the ignored data dir.
+if [ -z "${JO_WHATSAPP_ADMIN_TOKEN:-}" ]; then
+  ADMIN_TOKEN_FILE="$DATA_DIR/.admin-token"
+  if [ ! -s "$ADMIN_TOKEN_FILE" ]; then
+    TOKEN_TMP="$ADMIN_TOKEN_FILE.$$"
+    (umask 077; openssl rand -hex 32 > "$TOKEN_TMP") || exit 1
+    mv "$TOKEN_TMP" "$ADMIN_TOKEN_FILE"
+  fi
+  chmod 600 "$ADMIN_TOKEN_FILE"
+  export JO_WHATSAPP_ADMIN_TOKEN="$(<"$ADMIN_TOKEN_FILE")"
+fi
+
 echo "🚀 WhatsApp server: http://localhost:$PORT"
 echo "📁 Data: $DATA_DIR"
 echo "🔗 Jo Bot: $JO_BOT_URL"

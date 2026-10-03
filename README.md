@@ -41,6 +41,33 @@ That means:
 - Changes under `src/`, `package.json`, or `openclaw.plugin.json` need a new npm package release.
 - If a change touches both surfaces, release both.
 
+### Shared-number durable inbox
+
+The internal shared-number inbox retains terminal tombstones for 90 days. This
+bounds duplicate suppression to that retention window; provider retries older
+than it can be processed again. Entries that have not reached a terminal ack
+are never evicted. All entry and tombstone artifacts share a per-number 512 MiB
+cap, so a full inbox fails closed rather than discarding unacknowledged work.
+
+Shared-number clients use Whatsmeow's synchronous acknowledgment and decrypted
+event buffer. The success-status handler returns false on durable-storage failure,
+withholding the provider receipt and retaining the decrypted event for a retry.
+This is a client-side durability boundary, not a formal guarantee of every
+WhatsApp server redelivery or of recovery after volume/session loss. SSE
+notification loss after persistence is recovered by the active stream's scan.
+
+Processing is `pending → started → ready → ack`. Started attempts require a
+compare-and-set owner token; ready response checkpoints are immutable. Acks
+remove content after a durable tombstone is written. Inbox files/directories
+are private and use the session encryption key when configured. The authenticated
+`/internal/linq-numbers/{id}/events/status` endpoint exposes aggregate counts,
+oldest age, and bytes only. No unacknowledged content is automatically expired.
+
+Record/checkpoint JSON is bounded to 64 MiB (encrypted disk envelopes separately
+bounded). Checkpoints are read by opaque inbox ID rather than scanning all users'
+response bodies. SSE retains only lightweight references during replay and does
+not repeatedly load previously-emitted checkpoints on its notification scan.
+
 ---
 
 Connect your AI assistant to WhatsApp in minutes. Send messages, receive events via SSE, and manage multiple sessions with a simple REST API.

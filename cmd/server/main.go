@@ -53,16 +53,21 @@ func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 type SessionManager struct {
-	sessions           map[int]*UserSession
-	mu                 sync.RWMutex
-	dataDir            string
-	joBotURL           string
-	joBotInternalToken string
-	encryptKey         []byte
-	unloadGrace        time.Duration
-	connectReadyWait   time.Duration
-	connectReadyPoll   time.Duration
-	loadSession        func(int) (*UserSession, error)
+	sessions            map[int]*UserSession
+	numberSessions      map[int]*numberSessionState
+	inboxMu             sync.Mutex
+	mu                  sync.RWMutex
+	dataDir             string
+	adminToken          string
+	numberRegistryErr   error
+	numberReceiptWriter func(*SessionManager, int, string, deliveryReceipt) error
+	joBotURL            string
+	joBotInternalToken  string
+	encryptKey          []byte
+	unloadGrace         time.Duration
+	connectReadyWait    time.Duration
+	connectReadyPoll    time.Duration
+	loadSession         func(int) (*UserSession, error)
 }
 
 // PendingMediaRetry stores info needed to complete a media retry download
@@ -101,8 +106,17 @@ type mediaCacheBudget struct {
 
 var processMediaCacheBudget = &mediaCacheBudget{limit: mediaCacheGlobalMaxBytes}
 
+type SessionKind string
+
+const (
+	UserSessionKind       SessionKind = "user"
+	LinqNumberSessionKind SessionKind = "linq_number"
+)
+
 type UserSession struct {
+	Kind             SessionKind
 	UserID           int
+	LinqNumberID     int
 	Client           WhatsAppClient
 	Container        *sqlstore.Container
 	DBPath           string
@@ -110,6 +124,7 @@ type UserSession struct {
 	QRChannel        chan string
 	LoginDone        chan bool
 	EventChan        chan MessageEvent
+	Inbox            *sharedInboxStore           // non-nil only for durable shared-number inbound events
 	MediaCache       map[string]*mediaCacheEntry // Cache downloaded media by message ID
 	MediaMu          sync.RWMutex
 	mediaCacheSize   int64 // Current total bytes in this session's cache
@@ -259,18 +274,24 @@ func (s *UserSession) startMediaCacheEvictor() {
 }
 
 type MessageEvent struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload"`
+	Type               string          `json:"type"`
+	Payload            interface{}     `json:"payload"`
+	InboxID            string          `json:"inbox_id,omitempty"`
+	ProcessingState    string          `json:"processing_state,omitempty"`
+	ResponseCheckpoint json.RawMessage `json:"response_checkpoint,omitempty"`
 }
 
 type MessagePayload struct {
-	ID         string `json:"id"`
-	ChatJID    string `json:"chat_jid"`
-	SenderJID  string `json:"sender_jid"`
-	SenderName string `json:"sender_name"`
-	Text       string `json:"text"`
-	Timestamp  int64  `json:"timestamp"`
-	IsFromMe   bool   `json:"is_from_me"`
+	ID        string `json:"id"`
+	ChatJID   string `json:"chat_jid"`
+	SenderJID string `json:"sender_jid"`
+	// SenderAltJID is the phone-address alternative supplied for LID senders.
+	// It is omitted when WhatsApp did not provide one.
+	SenderAltJID string `json:"sender_alt_jid,omitempty"`
+	SenderName   string `json:"sender_name"`
+	Text         string `json:"text"`
+	Timestamp    int64  `json:"timestamp"`
+	IsFromMe     bool   `json:"is_from_me"`
 	// Media fields
 	MediaType string `json:"media_type,omitempty"` // "image", "location", etc.
 	MediaURL  string `json:"media_url,omitempty"`
@@ -282,6 +303,9 @@ type MessagePayload struct {
 	// Contact fields (vCard)
 	ContactName  string `json:"contact_name,omitempty"`
 	ContactVCard string `json:"contact_vcard,omitempty"`
+	// ContactIndex distinguishes otherwise-identical elements of a contact array.
+	// It is absent for ordinary messages and single contacts.
+	ContactIndex *int `json:"contact_index,omitempty"`
 	// Media download info
 	MediaKey      []byte `json:"media_key,omitempty"`
 	DirectPath    string `json:"direct_path,omitempty"`
@@ -475,16 +499,20 @@ func NewSessionManager(dataDir, joBotURL, encryptKeyB64 string) *SessionManager 
 	}
 
 	manager := &SessionManager{
-		sessions:           make(map[int]*UserSession),
-		dataDir:            dataDir,
-		joBotURL:           joBotURL,
-		joBotInternalToken: strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
-		encryptKey:         encryptKey,
-		unloadGrace:        configuredUnloadGrace(),
-		connectReadyWait:   defaultConnectReadyWait,
-		connectReadyPoll:   defaultConnectReadyPoll,
+		sessions:            make(map[int]*UserSession),
+		numberSessions:      make(map[int]*numberSessionState),
+		dataDir:             dataDir,
+		adminToken:          strings.TrimSpace(os.Getenv("JO_WHATSAPP_ADMIN_TOKEN")),
+		numberReceiptWriter: writeLinqNumberDeliveryReceipt,
+		joBotURL:            joBotURL,
+		joBotInternalToken:  strings.TrimSpace(os.Getenv("JO_WHATSAPP_INTERNAL_TOKEN")),
+		encryptKey:          encryptKey,
+		unloadGrace:         configuredUnloadGrace(),
+		connectReadyWait:    defaultConnectReadyWait,
+		connectReadyPoll:    defaultConnectReadyPoll,
 	}
 	manager.loadSession = manager.GetOrCreateSession
+	manager.loadNumberRegistry()
 	return manager
 }
 
@@ -712,6 +740,7 @@ func (m *SessionManager) GetOrCreateSession(userID int) (*UserSession, error) {
 	client := newRealClientWrapper(rawClient)
 
 	session := &UserSession{
+		Kind:           UserSessionKind,
 		UserID:         userID,
 		Client:         client,
 		Container:      container,
@@ -870,7 +899,8 @@ func (m *SessionManager) SaveSession(userID int) {
 	}
 }
 
-func (s *UserSession) handleEvent(evt interface{}) {
+func (s *UserSession) handleEvent(evt interface{}) (success bool) {
+	success = true
 	if signal := whatsappTransportSignal(evt); signal != "" {
 		transportSignalsTotal.WithLabelValues(signal).Inc()
 		log.Printf("[whatsapp/transport] signal=%s session=%s", signal, piiFingerprint(fmt.Sprint(s.UserID)))
@@ -884,12 +914,13 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		}
 		eventStart := time.Now()
 		payload := MessagePayload{
-			ID:         v.Info.ID,
-			ChatJID:    v.Info.Chat.String(),
-			SenderJID:  v.Info.Sender.String(),
-			SenderName: v.Info.PushName,
-			Timestamp:  v.Info.Timestamp.Unix(),
-			IsFromMe:   v.Info.IsFromMe,
+			ID:           v.Info.ID,
+			ChatJID:      v.Info.Chat.String(),
+			SenderJID:    v.Info.Sender.String(),
+			SenderAltJID: senderAltJID(v.Info.SenderAlt),
+			SenderName:   v.Info.PushName,
+			Timestamp:    v.Info.Timestamp.Unix(),
+			IsFromMe:     v.Info.IsFromMe,
 		}
 
 		hasContent := false
@@ -1118,15 +1149,18 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		// Handle contact array messages (multiple contacts)
 		if contacts := v.Message.ContactsArrayMessage; contacts != nil {
 			// For multiple contacts, we'll send separate events for each
-			for _, contact := range contacts.Contacts {
+			for index, contact := range contacts.Contacts {
+				contactIndex := index
 				contactPayload := MessagePayload{
-					ID:         v.Info.ID,
-					ChatJID:    v.Info.Chat.String(),
-					SenderJID:  v.Info.Sender.String(),
-					SenderName: v.Info.PushName,
-					Timestamp:  v.Info.Timestamp.Unix(),
-					IsFromMe:   v.Info.IsFromMe,
-					MediaType:  "contact",
+					ID:           v.Info.ID,
+					ChatJID:      v.Info.Chat.String(),
+					SenderJID:    v.Info.Sender.String(),
+					SenderAltJID: senderAltJID(v.Info.SenderAlt),
+					SenderName:   v.Info.PushName,
+					Timestamp:    v.Info.Timestamp.Unix(),
+					IsFromMe:     v.Info.IsFromMe,
+					MediaType:    "contact",
+					ContactIndex: &contactIndex,
 				}
 				if contact.DisplayName != nil {
 					contactPayload.ContactName = *contact.DisplayName
@@ -1134,10 +1168,8 @@ func (s *UserSession) handleEvent(evt interface{}) {
 				if contact.Vcard != nil {
 					contactPayload.ContactVCard = *contact.Vcard
 				}
-				select {
-				case s.EventChan <- MessageEvent{Type: "message", Payload: contactPayload}:
-				default:
-					log.Printf("Event channel full, dropping contact event")
+				if !s.publishMessageEvent(MessageEvent{Type: "message", Payload: contactPayload}) {
+					return false
 				}
 			}
 			// Don't set hasContent since we've already sent the events
@@ -1162,10 +1194,8 @@ func (s *UserSession) handleEvent(evt interface{}) {
 			messagesTotal.WithLabelValues("inbound", msgType).Inc()
 			observeMessageProcessing(msgType, eventStart)
 
-			select {
-			case s.EventChan <- MessageEvent{Type: "message", Payload: payload}:
-			default:
-				log.Printf("Event channel full, dropping message event")
+			if !s.publishMessageEvent(MessageEvent{Type: "message", Payload: payload}) {
+				return false
 			}
 		}
 
@@ -1177,6 +1207,7 @@ func (s *UserSession) handleEvent(evt interface{}) {
 		// This contains a new DirectPath for downloading media that was re-uploaded
 		s.handleMediaRetry(v)
 	}
+	return success
 }
 
 // handleMediaRetry processes the events.MediaRetry response after we sent SendMediaRetryReceipt
@@ -1643,6 +1674,30 @@ func sendMessageHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sendReaction(ctx context.Context, session *UserSession, jid types.JID, messageID, emoji string, targetFromMe bool) (whatsmeow.SendResponse, error) {
+	message := &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key: &waCommon.MessageKey{
+			RemoteJID: proto.String(jid.String()),
+			FromMe:    proto.Bool(targetFromMe),
+			ID:        proto.String(messageID),
+		},
+		Text:              proto.String(emoji),
+		SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+	}}
+	started := time.Now()
+	response, err := session.Client.SendMessage(ctx, jid, message)
+	observeMessageProcessing("text", started)
+	return response, err
+}
+
+func sendTyping(ctx context.Context, session *UserSession, jid types.JID, typing bool) error {
+	presence := types.ChatPresencePaused
+	if typing {
+		presence = types.ChatPresenceComposing
+	}
+	return session.Client.SendChatPresence(ctx, jid, presence, types.ChatPresenceMediaText)
+}
+
 func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1671,22 +1726,7 @@ func sendReactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build reaction message
-	msg := &waE2E.Message{
-		ReactionMessage: &waE2E.ReactionMessage{
-			Key: &waCommon.MessageKey{
-				RemoteJID: proto.String(req.ChatJID),
-				FromMe:    proto.Bool(true),
-				ID:        proto.String(req.MessageID),
-			},
-			Text:              proto.String(req.Emoji),
-			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
-		},
-	}
-
-	sendStart := time.Now()
-	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
-	observeMessageProcessing("text", sendStart)
+	resp, err := sendReaction(context.Background(), session, jid, req.MessageID, req.Emoji, true)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1726,15 +1766,7 @@ func setTypingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var presence types.ChatPresence
-	if req.Typing {
-		presence = types.ChatPresenceComposing
-	} else {
-		presence = types.ChatPresencePaused
-	}
-
-	err = session.Client.SendChatPresence(context.Background(), jid, presence, types.ChatPresenceMediaText)
-	if err != nil {
+	if err := sendTyping(context.Background(), session, jid, req.Typing); err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1834,29 +1866,7 @@ func sendImageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upload to WhatsApp servers
-	uploaded, err := session.Client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to upload image: "+err.Error())
-		return
-	}
-
-	// Build and send image message
-	msg := &waE2E.Message{
-		ImageMessage: &waE2E.ImageMessage{
-			Caption:       proto.String(req.Caption),
-			URL:           proto.String(uploaded.URL),
-			DirectPath:    proto.String(uploaded.DirectPath),
-			MediaKey:      uploaded.MediaKey,
-			Mimetype:      proto.String(req.MimeType),
-			FileEncSHA256: uploaded.FileEncSHA256,
-			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(imageData))),
-		},
-	}
-
-	sendStart := time.Now()
-	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
-	observeMessageProcessing("media", sendStart)
+	resp, err := sendUploadedImage(context.Background(), session, jid, imageData, req.MimeType, req.Caption, "")
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1989,29 +1999,7 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uploaded, err := session.Client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to upload document: "+err.Error())
-		return
-	}
-
-	msg := &waE2E.Message{
-		DocumentMessage: &waE2E.DocumentMessage{
-			Caption:       proto.String(req.Caption),
-			URL:           proto.String(uploaded.URL),
-			DirectPath:    proto.String(uploaded.DirectPath),
-			MediaKey:      uploaded.MediaKey,
-			Mimetype:      proto.String(req.MimeType),
-			FileEncSHA256: uploaded.FileEncSHA256,
-			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(docData))),
-			FileName:      proto.String(req.Filename),
-		},
-	}
-
-	sendStart := time.Now()
-	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
-	observeMessageProcessing("media", sendStart)
+	resp, err := sendUploadedDocument(context.Background(), session, jid, docData, req.MimeType, req.Filename, req.Caption, "")
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2022,6 +2010,66 @@ func sendDocumentHandler(w http.ResponseWriter, r *http.Request) {
 		"id":        resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
 	})
+}
+
+func mediaReplyContext(replyTo string, chatJID types.JID) *waE2E.ContextInfo {
+	if replyTo == "" {
+		return nil
+	}
+	return &waE2E.ContextInfo{
+		StanzaID:      proto.String(replyTo),
+		Participant:   proto.String(chatJID.String()),
+		QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
+	}
+}
+
+// sendUploadedImage is shared by personal and number-scoped sends so both use
+// the same WhatsApp upload and ImageMessage construction path.
+func sendUploadedImage(ctx context.Context, session *UserSession, jid types.JID, data []byte, mimeType, caption, replyTo string, extras ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	uploaded, err := session.Client.Upload(ctx, data, whatsmeow.MediaImage)
+	if err != nil {
+		return whatsmeow.SendResponse{}, fmt.Errorf("failed to upload image: %w", err)
+	}
+	message := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Caption:       proto.String(caption),
+		ContextInfo:   mediaReplyContext(replyTo, jid),
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String(mimeType),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(data))),
+	}}
+	started := time.Now()
+	response, err := session.Client.SendMessage(ctx, jid, message, extras...)
+	observeMessageProcessing("media", started)
+	return response, err
+}
+
+// sendUploadedDocument is shared by personal and number-scoped sends so both
+// use the same WhatsApp upload and DocumentMessage construction path.
+func sendUploadedDocument(ctx context.Context, session *UserSession, jid types.JID, data []byte, mimeType, filename, caption, replyTo string, extras ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	uploaded, err := session.Client.Upload(ctx, data, whatsmeow.MediaDocument)
+	if err != nil {
+		return whatsmeow.SendResponse{}, fmt.Errorf("failed to upload document: %w", err)
+	}
+	message := &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+		Caption:       proto.String(caption),
+		ContextInfo:   mediaReplyContext(replyTo, jid),
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String(mimeType),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(data))),
+		FileName:      proto.String(filename),
+	}}
+	started := time.Now()
+	response, err := session.Client.SendMessage(ctx, jid, message, extras...)
+	observeMessageProcessing("media", started)
+	return response, err
 }
 
 func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
@@ -2078,24 +2126,26 @@ func sendLocationHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type mediaDownloadRequest struct {
+	UserID        int    `json:"user_id"`
+	MessageID     string `json:"message_id"` // For cache lookup
+	URL           string `json:"url"`
+	DirectPath    string `json:"direct_path"`
+	MediaKey      []byte `json:"media_key"`
+	FileEncSHA256 []byte `json:"file_enc_sha256"`
+	FileSHA256    []byte `json:"file_sha256"`
+	FileLength    uint64 `json:"file_length"`
+	MimeType      string `json:"mime_type"`
+	IsPTT         bool   `json:"is_ptt"`
+}
+
 func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	var req struct {
-		UserID        int    `json:"user_id"`
-		MessageID     string `json:"message_id"` // For cache lookup
-		URL           string `json:"url"`
-		DirectPath    string `json:"direct_path"`
-		MediaKey      []byte `json:"media_key"`
-		FileEncSHA256 []byte `json:"file_enc_sha256"`
-		FileSHA256    []byte `json:"file_sha256"`
-		FileLength    uint64 `json:"file_length"`
-		MimeType      string `json:"mime_type"`
-		IsPTT         bool   `json:"is_ptt"`
-	}
+	var req mediaDownloadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid json")
 		return
@@ -2105,7 +2155,10 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	downloadMediaForSession(w, session, req)
+}
 
+func downloadMediaForSession(w http.ResponseWriter, session *UserSession, req mediaDownloadRequest) {
 	// Check cache first (media downloaded immediately on receive)
 	if req.MessageID != "" {
 		if cachedData, found := session.mediaCacheGet(req.MessageID); found {
@@ -2168,7 +2221,7 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 			mmsType,
 		)
 
-		log.Printf("[media/download] Attempt %d: dataLen=%d, err=%v", attempt+1, len(data), err)
+		log.Printf("[media/download] Attempt %d: dataLen=%d, err_type=%T", attempt+1, len(data), err)
 
 		if err != nil {
 			continue
@@ -2182,8 +2235,8 @@ func downloadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("[media/download] All attempts failed: %v", err)
-		errorResponse(w, http.StatusInternalServerError, "failed to download: "+err.Error())
+		log.Printf("[media/download] All attempts failed: err_type=%T", err)
+		errorResponse(w, http.StatusInternalServerError, "media download failed")
 		return
 	}
 	if len(data) == 0 {
@@ -2233,6 +2286,9 @@ func parseDirectChatJID(raw string) (types.JID, error) {
 
 func registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/health", instrumentHandler("health", healthHandler))
+	mux.HandleFunc("/internal/linq-numbers/", instrumentHandler("internal_linq_numbers", linqNumberInternalHandler))
+	mux.HandleFunc("/admin/linq-numbers", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
+	mux.HandleFunc("/admin/linq-numbers/", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
 	mux.Handle("/metrics", metricsHandler())
 	mux.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
 	mux.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
