@@ -2,9 +2,67 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestSharedInboxAckMakesCapacityForDurableTombstone(t *testing.T) {
+	m := NewSessionManager(t.TempDir(), "", "")
+	store := &sharedInboxStore{manager: m}
+	entry, _, err := store.persistInbound(2, durableInboxEvent("ack-capacity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyInboxEntry(t, store, 2, entry.InboxID, "owner")
+
+	tombstoneData, err := store.encode(&sharedInboxTombstone{InboxID: entry.InboxID, Outcome: "completed", CreatedAt: time.Now().UnixNano()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	used, err := store.usedBytesLocked(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leave one byte too little to add a tombstone alongside the payload, while
+	// retaining enough capacity after the payload is removed.
+	reserve := int64(sharedInboxMaxBytes) - used - int64(len(tombstoneData)) + 1
+	if reserve <= 0 {
+		t.Fatalf("invalid test reserve: %d", reserve)
+	}
+	for remaining, i := reserve, 0; remaining > 0; i++ {
+		size := remaining
+		if size > sharedInboxMaxDiskBytes {
+			size = sharedInboxMaxDiskBytes
+		}
+		reservedPath := filepath.Join(store.numberDir(2), "entries", fmt.Sprintf("reserved-%d.json", i))
+		if err := os.WriteFile(reservedPath, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(reservedPath, size); err != nil {
+			t.Fatal(err)
+		}
+		remaining -= size
+	}
+
+	if err := store.ack(2, entry.InboxID, "completed", ""); err != nil {
+		t.Fatalf("terminal ack lost to temporary tombstone capacity: %v", err)
+	}
+	if tombstone, err := store.readTombstone(2, entry.InboxID); err != nil || tombstone == nil {
+		t.Fatalf("terminal tombstone = %#v, %v", tombstone, err)
+	}
+	if _, err := os.Stat(store.entryPath(2, entry.SourceKey)); !os.IsNotExist(err) {
+		t.Fatalf("terminal payload was retained: %v", err)
+	}
+	if used, err := store.usedBytesLocked(2); err != nil || used > sharedInboxMaxBytes {
+		t.Fatalf("terminal ack capacity = %d, %v", used, err)
+	}
+	if _, duplicate, err := store.persistInbound(2, durableInboxEvent("ack-capacity")); err != nil || !duplicate {
+		t.Fatalf("terminal duplicate suppression = %v, %v", duplicate, err)
+	}
+}
 
 func TestSharedInboxAckCrashResidueIsRemovedWithoutReplay(t *testing.T) {
 	m := NewSessionManager(t.TempDir(), "", "")

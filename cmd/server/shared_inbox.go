@@ -503,7 +503,14 @@ func (s *sharedInboxStore) ack(numberID int, inboxID, outcome, token string) err
 	if err := s.cleanupTombstonesLocked(numberID, time.Now()); err != nil {
 		return err
 	}
-	if err := s.fitsLocked(numberID, 0, int64(len(data))); err != nil {
+	// Account for the payload that will be removed only after the tombstone is
+	// durable. This permits terminal progress at the cap without risking replay:
+	// the bounded tombstone is the sole temporary overage.
+	old, err := os.Stat(s.entryPath(numberID, entry.SourceKey))
+	if err != nil {
+		return err
+	}
+	if err := s.fitsLocked(numberID, old.Size(), int64(len(data))); err != nil {
 		return err
 	}
 	if err := atomicPrivateWrite(s.tombstonePath(numberID, inboxID), data); err != nil {
