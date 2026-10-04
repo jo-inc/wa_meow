@@ -1916,37 +1916,9 @@ func sendAudioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upload to WhatsApp servers
-	uploaded, err := session.Client.Upload(context.Background(), audioData, whatsmeow.MediaAudio)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to upload audio: "+err.Error())
-		return
-	}
-
-	// Build and send audio message
-	audioMsg := &waE2E.AudioMessage{
-		URL:           proto.String(uploaded.URL),
-		DirectPath:    proto.String(uploaded.DirectPath),
-		MediaKey:      uploaded.MediaKey,
-		Mimetype:      proto.String(req.MimeType),
-		FileEncSHA256: uploaded.FileEncSHA256,
-		FileSHA256:    uploaded.FileSHA256,
-		FileLength:    proto.Uint64(uint64(len(audioData))),
-		PTT:           proto.Bool(req.PTT),
-	}
-
-	// Set duration if provided
-	if req.Seconds > 0 {
-		audioMsg.Seconds = proto.Uint32(req.Seconds)
-	}
-
-	msg := &waE2E.Message{
-		AudioMessage: audioMsg,
-	}
-
-	msgStart := time.Now()
-	resp, err := session.Client.SendMessage(context.Background(), jid, msg)
-	observeMessageProcessing("voice", msgStart)
+	// Upload and send through the shared builder so audio construction stays
+	// consistent with number-scoped audio sends.
+	resp, err := sendUploadedAudio(context.Background(), session, jid, audioData, req.MimeType, req.PTT, req.Seconds, "")
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2023,8 +1995,31 @@ func mediaReplyContext(replyTo string, chatJID types.JID) *waE2E.ContextInfo {
 	}
 }
 
-// sendUploadedImage is shared by personal and number-scoped sends so both use
-// the same WhatsApp upload and ImageMessage construction path.
+func sendUploadedAudio(ctx context.Context, session *UserSession, jid types.JID, data []byte, mimeType string, ptt bool, seconds uint32, replyTo string, extras ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	uploaded, err := session.Client.Upload(ctx, data, whatsmeow.MediaAudio)
+	if err != nil {
+		return whatsmeow.SendResponse{}, fmt.Errorf("failed to upload audio: %w", err)
+	}
+	audio := &waE2E.AudioMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String(mimeType),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uint64(len(data))),
+		PTT:           proto.Bool(ptt),
+		ContextInfo:   mediaReplyContext(replyTo, jid),
+	}
+	if seconds > 0 {
+		audio.Seconds = proto.Uint32(seconds)
+	}
+	started := time.Now()
+	response, err := session.Client.SendMessage(ctx, jid, &waE2E.Message{AudioMessage: audio}, extras...)
+	observeMessageProcessing("voice", started)
+	return response, err
+}
+
 func sendUploadedImage(ctx context.Context, session *UserSession, jid types.JID, data []byte, mimeType, caption, replyTo string, extras ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	uploaded, err := session.Client.Upload(ctx, data, whatsmeow.MediaImage)
 	if err != nil {

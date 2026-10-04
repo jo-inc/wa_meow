@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -409,6 +410,8 @@ func linqNumberInternalHandler(w http.ResponseWriter, r *http.Request) {
 		sendInternalLinqNumberMediaHandler(w, r, numberID, linqNumberMediaImage)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "messages" && parts[4] == "document":
 		sendInternalLinqNumberMediaHandler(w, r, numberID, linqNumberMediaDocument)
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "messages" && parts[4] == "audio":
+		sendInternalLinqNumberMediaHandler(w, r, numberID, linqNumberMediaAudio)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "media" && parts[4] == "download":
 		downloadInternalLinqNumberMediaHandler(w, r, numberID)
 	default:
@@ -975,6 +978,7 @@ func sendInternalLinqNumberTextHandler(w http.ResponseWriter, r *http.Request, n
 const (
 	maxLinqNumberDecodedMediaBytes = 25 * 1024 * 1024
 	maxLinqNumberMediaRequestBytes = 34 * 1024 * 1024
+	maxLinqNumberAudioSeconds      = 24 * 60 * 60
 )
 
 type linqNumberMediaKind string
@@ -982,15 +986,19 @@ type linqNumberMediaKind string
 const (
 	linqNumberMediaImage    linqNumberMediaKind = "image"
 	linqNumberMediaDocument linqNumberMediaKind = "document"
+	linqNumberMediaAudio    linqNumberMediaKind = "audio"
 )
 
 type linqNumberMediaRequest struct {
 	ChatJID     string `json:"chat_jid"`
 	ImageB64    string `json:"image_b64"`
 	DocB64      string `json:"doc_b64"`
+	AudioB64    string `json:"audio_b64"`
 	MimeType    string `json:"mime_type"`
 	Caption     string `json:"caption"`
 	Filename    string `json:"filename"`
+	PTT         bool   `json:"ptt"`
+	Seconds     uint32 `json:"seconds"`
 	ReplyTo     string `json:"reply_to"`
 	DeliveryKey string `json:"delivery_key"`
 }
@@ -1011,6 +1019,8 @@ func decodeLinqNumberMediaRequest(w http.ResponseWriter, r *http.Request, kind l
 	encoded := request.ImageB64
 	if kind == linqNumberMediaDocument {
 		encoded = request.DocB64
+	} else if kind == linqNumberMediaAudio {
+		encoded = request.AudioB64
 	}
 	if strings.TrimSpace(request.ChatJID) == "" || strings.TrimSpace(encoded) == "" || strings.TrimSpace(request.MimeType) == "" || strings.TrimSpace(request.DeliveryKey) == "" || len(request.MimeType) > 255 || len(request.Caption) > 4096 || len(request.Filename) > 255 || len(request.ReplyTo) > 512 || len(request.DeliveryKey) > 200 || base64.StdEncoding.DecodedLen(len(encoded)) > maxLinqNumberDecodedMediaBytes {
 		errorResponse(w, http.StatusBadRequest, "chat jid, media, mime type, and delivery key required")
@@ -1020,8 +1030,15 @@ func decodeLinqNumberMediaRequest(w http.ResponseWriter, r *http.Request, kind l
 		errorResponse(w, http.StatusBadRequest, "filename required")
 		return nil, false
 	}
+	if kind == linqNumberMediaAudio {
+		parsedMime, _, err := mime.ParseMediaType(request.MimeType)
+		if err != nil || !strings.HasPrefix(strings.ToLower(parsedMime), "audio/") || len(parsedMime) == len("audio/") || request.Seconds > maxLinqNumberAudioSeconds {
+			errorResponse(w, http.StatusBadRequest, "invalid audio request")
+			return nil, false
+		}
+	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(data) == 0 || len(data) > maxLinqNumberDecodedMediaBytes {
+	if err != nil || len(data) == 0 || len(data) > maxLinqNumberDecodedMediaBytes || base64.StdEncoding.EncodeToString(data) != encoded {
 		errorResponse(w, http.StatusBadRequest, "invalid media encoding")
 		return nil, false
 	}
@@ -1068,8 +1085,10 @@ func sendInternalLinqNumberMediaHandler(w http.ResponseWriter, r *http.Request, 
 	var response whatsmeow.SendResponse
 	if kind == linqNumberMediaImage {
 		response, err = sendUploadedImage(r.Context(), session, jid, data, request.MimeType, request.Caption, request.ReplyTo, extra)
-	} else {
+	} else if kind == linqNumberMediaDocument {
 		response, err = sendUploadedDocument(r.Context(), session, jid, data, request.MimeType, request.Filename, request.Caption, request.ReplyTo, extra)
+	} else {
+		response, err = sendUploadedAudio(r.Context(), session, jid, data, request.MimeType, request.PTT, request.Seconds, request.ReplyTo, extra)
 	}
 	if err != nil {
 		errorResponse(w, http.StatusBadGateway, "WhatsApp media delivery failed")
@@ -1081,7 +1100,11 @@ func sendInternalLinqNumberMediaHandler(w http.ResponseWriter, r *http.Request, 
 		errorResponse(w, http.StatusInternalServerError, "media sent but receipt persistence failed")
 		return
 	}
-	messagesTotal.WithLabelValues("outbound", "media").Inc()
+	if kind == linqNumberMediaAudio && request.PTT {
+		messagesTotal.WithLabelValues("outbound", "voice").Inc()
+	} else {
+		messagesTotal.WithLabelValues("outbound", "media").Inc()
+	}
 	jsonResponse(w, map[string]interface{}{"id": response.ID, "timestamp": response.Timestamp.Unix(), "deduplicated": false})
 }
 
