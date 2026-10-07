@@ -50,6 +50,25 @@ func injectMockSession(m *SessionManager, userID int, client *MockWhatsAppClient
 	return session
 }
 
+func TestServerListenAddress(t *testing.T) {
+	tests := []struct {
+		name       string
+		port       string
+		configured string
+		want       string
+	}{
+		{name: "defaults to all interfaces for production", port: "8090", want: ":8090"},
+		{name: "uses configured loopback address for local runs", port: "8090", configured: "127.0.0.1:8090", want: "127.0.0.1:8090"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serverListenAddress(tt.port, tt.configured); got != tt.want {
+				t.Fatalf("serverListenAddress() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // ==================== SessionManager Tests ====================
 
 func TestNewSessionManager(t *testing.T) {

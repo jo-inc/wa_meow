@@ -2301,6 +2301,13 @@ func registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/events", instrumentHandler("events", eventsHandler))
 }
 
+func serverListenAddress(port, configuredAddress string) string {
+	if configuredAddress != "" {
+		return configuredAddress
+	}
+	return ":" + port
+}
+
 func main() {
 	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
 		err := sentry.Init(sentry.ClientOptions{
@@ -2324,6 +2331,7 @@ func main() {
 	}
 
 	joBotURL := os.Getenv("JO_BOT_URL")
+	listenAddress := serverListenAddress(port, os.Getenv("LISTEN_ADDR"))
 	encryptKey := os.Getenv("WHATSAPP_SESSION_KEY")
 
 	manager = NewSessionManager(dataDir, joBotURL, encryptKey)
@@ -2332,7 +2340,7 @@ func main() {
 	mux := http.NewServeMux()
 	registerHandlers(mux)
 
-	log.Printf("🚀 WhatsApp server starting on port %s", port)
+	log.Printf("🚀 WhatsApp server listening on %s", listenAddress)
 	log.Printf("📁 Data directory: %s", dataDir)
 	if joBotURL != "" {
 		log.Printf("🔗 Jo Bot URL: %s", joBotURL)
@@ -2341,7 +2349,7 @@ func main() {
 		log.Printf("🔐 Session persistence enabled")
 	}
 
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(listenAddress, mux); err != nil {
 		sentry.CaptureException(err)
 		sentry.Flush(2 * time.Second)
 		log.Fatal(err)

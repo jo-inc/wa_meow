@@ -5,7 +5,10 @@ cd "$(dirname "$0")"
 
 export DATA_DIR="${DATA_DIR:-./data}"
 export PORT="${PORT:-8090}"
+export LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1:$PORT}"
 export JO_BOT_URL="${JO_BOT_URL:-http://localhost:10000}"
+SERVER_BIN="${SERVER_BIN:-./tmp/server}"
+BUILD_SERVER="${BUILD_SERVER:-1}"
 
 # Fixed dev key for local development (32 bytes base64-encoded)
 # In production: fly secrets set WHATSAPP_SESSION_KEY="$(openssl rand -base64 32)"
@@ -42,7 +45,12 @@ echo "  curl localhost:$PORT/sessions/status?user_id=195"
 echo ""
 
 # Build and run (logs visible)
-echo "🔨 Building..."
-go build -o ./tmp/server ./cmd/server || exit 1
+if [ "$BUILD_SERVER" = "1" ]; then
+  echo "🔨 Building..."
+  go build -o "$SERVER_BIN" ./cmd/server || exit 1
+elif [ ! -x "$SERVER_BIN" ]; then
+  echo "Prebuilt server binary is not executable: $SERVER_BIN" >&2
+  exit 1
+fi
 echo "✅ Running server..."
-./tmp/server 2>&1
+exec "$SERVER_BIN" 2>&1
