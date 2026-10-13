@@ -1,0 +1,352 @@
+package main
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+)
+
+func TestPairingReceiptBindsOwnerProofAndAcknowledgedBackup(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	backupStatus := http.StatusBadGateway
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/whatsapp/session" {
+			t.Fatalf("unexpected backup request: %s %s", r.Method, r.URL.Path)
+		}
+		var payload struct {
+			SHA256 string `json:"sha256"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.SHA256 == "" {
+			t.Fatalf("invalid backup payload: %v", err)
+		}
+		w.WriteHeader(backupStatus)
+		if backupStatus == http.StatusOK {
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha256": payload.SHA256})
+		}
+	}))
+	defer backend.Close()
+
+	manager = NewSessionManager(t.TempDir(), backend.URL, key)
+	manager.joBotInternalToken = testInternalToken
+	client := NewMockClient()
+	session := injectMockSession(manager, 71, client)
+	db, err := sql.Open("sqlite3", sessionBackupPath(manager, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE pairing_state (value TEXT); INSERT INTO pairing_state VALUES ('paired');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	requestID := "11111111-1111-4111-8111-111111111111"
+	start := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/sessions/pairing-attempt", bytes.NewBufferString(body))
+		r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+		createPairingAttemptHandler(w, r)
+		return w
+	}
+	if got := start(`{"user_id":71,"request_id":"` + requestID + `"} {}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("trailing attempt JSON = %d", got.Code)
+	}
+	started := start(`{"user_id":71,"request_id":"` + requestID + `"}`)
+	if started.Code != http.StatusOK {
+		t.Fatalf("start pairing attempt = %d: %s", started.Code, started.Body.String())
+	}
+	var result struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &result); err != nil || result.AttemptID == "" {
+		t.Fatalf("start response: %v %s", err, started.Body.String())
+	}
+	if duplicate := start(`{"user_id":71,"request_id":"22222222-2222-4222-8222-222222222222"}`); duplicate.Code != http.StatusConflict {
+		t.Fatalf("simultaneous attempt = %d: %s", duplicate.Code, duplicate.Body.String())
+	}
+
+	receipt := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/sessions/pairing-receipt", bytes.NewBufferString(body))
+		r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+		pairingReceiptHandler(w, r)
+		return w
+	}
+	if got := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71} {}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("trailing receipt JSON = %d", got.Code)
+	}
+	if got := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":72}`); got.Code != http.StatusForbidden {
+		t.Fatalf("wrong receipt owner = %d", got.Code)
+	}
+
+	attempt := manager.pairingAttempt(result.AttemptID)
+	validPair := &events.PairSuccess{
+		ID:  types.JID{User: "15550001111", RawAgent: 3, Device: 9, Server: types.DefaultUserServer},
+		LID: types.JID{User: "12345", RawAgent: 2, Device: 8, Server: types.HiddenUserServer},
+	}
+	// whatsmeow dispatches our session handler before its QRChannel handler. The
+	// QR goroutine therefore sees success after this PairSuccess and Connected.
+	session.handleEvent(validPair)
+	session.handleEvent(&events.Connected{})
+	if got := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71}`); !bytes.Contains(got.Body.Bytes(), []byte(`"status":"pending"`)) {
+		t.Fatalf("provider candidate without QR lifecycle proof accepted: %s", got.Body.String())
+	}
+
+	// A success from any other QR lifecycle must not confirm this generation.
+	session.recordQRSuccess(attempt.generation + 1)
+	if got := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71}`); !bytes.Contains(got.Body.Bytes(), []byte(`"status":"pending"`)) {
+		t.Fatalf("prior-generation QR success accepted: %s", got.Body.String())
+	}
+
+	// A duplicate provider event cannot replace the exact first provider identity.
+	session.handleEvent(&events.PairSuccess{
+		ID:  types.JID{User: "15550002222", Server: types.DefaultUserServer},
+		LID: types.JID{User: "54321", Server: types.HiddenUserServer},
+	})
+	if attempt.pairedPN != "15550001111@s.whatsapp.net" || attempt.pairedLID != "12345@lid" {
+		t.Fatalf("duplicate PairSuccess overwrote provider identity: %q %q", attempt.pairedPN, attempt.pairedLID)
+	}
+
+	// QRChannelSuccess is generated by the same PairSuccess, but is delivered to
+	// our QR goroutine asynchronously after both provider events above.
+	session.recordQRSuccess(attempt.generation)
+	failed := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71}`)
+	if !bytes.Contains(failed.Body.Bytes(), []byte(`"status":"backup_failed"`)) {
+		t.Fatalf("unacknowledged backup paired session: %s", failed.Body.String())
+	}
+	if manager.GetSession(71) != session {
+		t.Fatal("backup failure removed the linked session")
+	}
+
+	backupStatus = http.StatusOK
+	paired := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71}`)
+	if paired.Code != http.StatusOK || !bytes.Contains(paired.Body.Bytes(), []byte(`"status":"paired"`)) {
+		t.Fatalf("acknowledged provider proof = %d: %s", paired.Code, paired.Body.String())
+	}
+	if !bytes.Contains(paired.Body.Bytes(), []byte(`"paired_pn":"15550001111@s.whatsapp.net"`)) || !bytes.Contains(paired.Body.Bytes(), []byte(`"paired_lid":"12345@lid"`)) {
+		t.Fatalf("identities were not canonical non-AD JIDs: %s", paired.Body.String())
+	}
+	if repeated := receipt(`{"attempt_id":"` + result.AttemptID + `","user_id":71}`); !bytes.Contains(repeated.Body.Bytes(), []byte(`"status":"paired"`)) {
+		t.Fatalf("duplicate receipt not idempotent: %s", repeated.Body.String())
+	}
+}
+
+func TestPairingProofRequiresConnectedAfterPairSuccessWhenQRSuccessArrivesFirst(t *testing.T) {
+	manager = NewSessionManager(t.TempDir(), "", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32)))
+	session := injectMockSession(manager, 72, NewMockClient())
+	attempt := &pairingAttempt{
+		userID:     72,
+		session:    session,
+		expiresAt:  time.Now().Add(time.Minute),
+		generation: 7,
+	}
+	session.pairingMu.Lock()
+	session.pairingGeneration = attempt.generation
+	session.pairingAttempt = attempt
+	session.pairingMu.Unlock()
+
+	// A connection from before the candidate cannot satisfy the reconnect proof.
+	session.handleEvent(&events.Connected{})
+	session.handleEvent(&events.PairSuccess{
+		ID:  types.JID{User: "15550003333", Server: types.DefaultUserServer},
+		LID: types.JID{User: "33333", Server: types.HiddenUserServer},
+	})
+	// This models the other valid provider dispatch order: QRChannelSuccess is
+	// consumed before the later reconnect reaches our event handler.
+	session.recordQRSuccess(attempt.generation)
+	if attempt.connected || !attempt.pairSuccess || !attempt.qrConfirmed {
+		t.Fatalf("proof accepted a pre-pair connection: %+v", attempt)
+	}
+
+	session.handleEvent(&events.Connected{})
+	if !attempt.pairSuccess || !attempt.qrConfirmed || !attempt.connected {
+		t.Fatalf("PairSuccess -> QR success -> Connected did not form proof: %+v", attempt)
+	}
+}
+
+func TestPairingReceiptRestartAndExpiryFailClosed(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32))
+	first := NewSessionManager(t.TempDir(), "", key)
+	manager = first
+	client := NewMockClient()
+	injectMockSession(first, 91, client)
+	token, err := first.beginPairingAttempt(91, "33333333-3333-4333-8333-333333333333")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := token.token
+
+	// A new process restores only the hashed capability and provider metadata.
+	// It deliberately does not recover process-memory QR/provider proof.
+	second := NewSessionManager(first.dataDir, "", key)
+	second.joBotInternalToken = testInternalToken
+	manager = second
+	injectMockSession(second, 91, NewMockClient())
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/sessions/pairing-receipt", bytes.NewBufferString(`{"attempt_id":"`+capability+`","user_id":91}`))
+	r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+	pairingReceiptHandler(w, r)
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"status":"recovery_required"`)) {
+		t.Fatalf("restart completed pairing without fresh proof: %s", w.Body.String())
+	}
+
+	attempt := second.pairingAttempt(capability)
+	attempt.expiresAt = time.Now().Add(-time.Second)
+	if err := second.persistPairingAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, "/sessions/pairing-receipt", bytes.NewBufferString(`{"attempt_id":"`+capability+`","user_id":91}`))
+	r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+	pairingReceiptHandler(w, r)
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"status":"missing"`)) {
+		t.Fatalf("expired capability was accepted: %s", w.Body.String())
+	}
+}
+
+func TestPairingAttemptIdempotencySurvivesLostAcknowledgementAndRestart(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	first := NewSessionManager(t.TempDir(), "", key)
+	first.joBotInternalToken = testInternalToken
+	manager = first
+	client := NewMockClient()
+	injectMockSession(first, 101, client)
+	requestID := "44444444-4444-4444-8444-444444444444"
+
+	start := func(userID int, id string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/sessions/pairing-attempt", bytes.NewBufferString(fmt.Sprintf(`{"user_id":%d,"request_id":%q}`, userID, id)))
+		r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+		createPairingAttemptHandler(w, r)
+		return w
+	}
+	firstResponse := start(101, requestID)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("first attempt = %d: %s", firstResponse.Code, firstResponse.Body.String())
+	}
+	var firstResult struct {
+		AttemptID string `json:"attempt_id"`
+		QRURL     string `json:"qr_url"`
+	}
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &firstResult); err != nil || firstResult.AttemptID == "" || firstResult.QRURL == "" {
+		t.Fatalf("invalid first response: %v", err)
+	}
+	if replay := start(101, requestID); replay.Code != http.StatusOK || replay.Body.String() != firstResponse.Body.String() {
+		t.Fatalf("lost-ack replay changed response: %d %s", replay.Code, replay.Body.String())
+	}
+	if got := len(client.GetCallsByMethod("Connect")); got != 1 {
+		t.Fatalf("same request started %d provider connections", got)
+	}
+	if wrongOwner := start(102, requestID); wrongOwner.Code != http.StatusConflict {
+		t.Fatalf("request ID was accepted for another owner: %d", wrongOwner.Code)
+	}
+
+	ledger, err := os.ReadFile(first.pairingLedgerPath(101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(ledger, []byte(firstResult.AttemptID)) {
+		t.Fatal("pairing capability was stored in plaintext")
+	}
+
+	second := NewSessionManager(first.dataDir, "", key)
+	second.joBotInternalToken = testInternalToken
+	manager = second
+	restartedClient := NewMockClient()
+	injectMockSession(second, 101, restartedClient)
+	recovered := start(101, requestID)
+	if recovered.Code != http.StatusOK || recovered.Body.String() != firstResponse.Body.String() {
+		t.Fatalf("restart replay changed response: %d %s", recovered.Code, recovered.Body.String())
+	}
+	if got := len(restartedClient.GetCallsByMethod("Connect")); got != 0 {
+		t.Fatalf("restart replay started %d provider connections", got)
+	}
+	attempt := second.pairingAttempt(firstResult.AttemptID)
+	if attempt == nil || !attempt.recovered {
+		t.Fatal("restart did not restore the exact attempt as recovery-required")
+	}
+	attempt.expiresAt = time.Now().Add(-time.Second)
+	if err := second.persistPairingAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	if expired := start(101, requestID); expired.Code != http.StatusConflict {
+		t.Fatalf("expired replay renewed an attempt: %d", expired.Code)
+	}
+	if got := len(restartedClient.GetCallsByMethod("Connect")); got != 0 {
+		t.Fatalf("expired replay started %d provider connections", got)
+	}
+}
+
+func TestPairingAttemptConcurrentRequestsStartOneFlow(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))
+	manager = NewSessionManager(t.TempDir(), "", key)
+	manager.joBotInternalToken = testInternalToken
+	client := NewMockClient()
+	injectMockSession(manager, 111, client)
+	requestIDs := []string{
+		"55555555-5555-4555-8555-555555555555",
+		"55555555-5555-4555-8555-555555555555",
+		"66666666-6666-4666-8666-666666666666",
+	}
+	start := func(requestID string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/sessions/pairing-attempt", bytes.NewBufferString(`{"user_id":111,"request_id":"`+requestID+`"}`))
+		r.Header.Set("X-WhatsApp-Internal-Token", testInternalToken)
+		createPairingAttemptHandler(w, r)
+		return w
+	}
+	first := start(requestIDs[0])
+	if first.Code != http.StatusOK {
+		t.Fatalf("initial request = %d: %s", first.Code, first.Body.String())
+	}
+	responses := make(chan *httptest.ResponseRecorder, len(requestIDs))
+	var wg sync.WaitGroup
+	for _, requestID := range requestIDs {
+		wg.Add(1)
+		go func(requestID string) {
+			defer wg.Done()
+			responses <- start(requestID)
+		}(requestID)
+	}
+	wg.Wait()
+	close(responses)
+	ok, conflict := 0, 0
+	var replayBody = first.Body.String()
+	for response := range responses {
+		switch response.Code {
+		case http.StatusOK:
+			ok++
+			if replayBody == "" {
+				replayBody = response.Body.String()
+			} else if response.Body.String() != replayBody {
+				t.Fatalf("same request did not return the same capability")
+			}
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Fatalf("concurrent request = %d: %s", response.Code, response.Body.String())
+		}
+	}
+	if ok != 2 || conflict != 1 {
+		t.Fatalf("concurrent outcomes = %d ok, %d conflict", ok, conflict)
+	}
+	if got := len(client.GetCallsByMethod("Connect")); got != 1 {
+		t.Fatalf("concurrent requests started %d provider connections", got)
+	}
+}
+
+func sessionBackupPath(m *SessionManager, userID int) string {
+	return m.dataDir + "/user_" + fmt.Sprint(userID) + ".db"
+}

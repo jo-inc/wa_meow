@@ -7,6 +7,8 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -55,6 +57,7 @@ func (t *baileysTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 type SessionManager struct {
 	sessions            map[int]*UserSession
 	numberSessions      map[int]*numberSessionState
+	pairingAttemptMu    sync.Mutex
 	inboxMu             sync.Mutex
 	mu                  sync.RWMutex
 	dataDir             string
@@ -144,6 +147,10 @@ type UserSession struct {
 	evictCancel     context.CancelFunc
 	evictWG         sync.WaitGroup
 	eventWG         sync.WaitGroup
+
+	pairingMu         sync.Mutex
+	pairingAttempt    *pairingAttempt
+	pairingGeneration uint64
 }
 
 func (s *UserSession) cacheBudget() *mediaCacheBudget {
@@ -621,13 +628,49 @@ func (m *SessionManager) fetchSessionFromJoBot(userID int) error {
 	return nil
 }
 
+func (m *SessionManager) sessionSnapshot(userID int) ([]byte, error) {
+	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
+	snapshot, err := os.CreateTemp(m.dataDir, fmt.Sprintf(".user_%d-backup-*.db", userID))
+	if err != nil {
+		return nil, fmt.Errorf("create session snapshot: %w", err)
+	}
+	snapshotPath := snapshot.Name()
+	if err := snapshot.Close(); err != nil {
+		_ = os.Remove(snapshotPath)
+		return nil, fmt.Errorf("close session snapshot: %w", err)
+	}
+	if err := os.Remove(snapshotPath); err != nil {
+		return nil, fmt.Errorf("prepare session snapshot: %w", err)
+	}
+	defer os.Remove(snapshotPath)
+
+	// VACUUM INTO is a SQLite-consistent, self-contained snapshot. It includes
+	// committed WAL state without copying a live .db file or its WAL separately.
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_foreign_keys=on")
+	if err != nil {
+		return nil, fmt.Errorf("open session database: %w", err)
+	}
+	defer db.Close()
+	quotedPath := "'" + strings.ReplaceAll(snapshotPath, "'", "''") + "'"
+	if _, err := db.Exec("VACUUM INTO " + quotedPath); err != nil {
+		return nil, fmt.Errorf("snapshot session database: %w", err)
+	}
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return nil, fmt.Errorf("read session snapshot: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("empty session snapshot")
+	}
+	return data, nil
+}
+
 func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	if m.joBotURL == "" || m.encryptKey == nil {
-		return nil
+		return errors.New("session backup is not configured")
 	}
 
-	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("user_%d.db", userID))
-	dbData, err := os.ReadFile(dbPath)
+	dbData, err := m.sessionSnapshot(userID)
 	if err != nil {
 		return err
 	}
@@ -636,10 +679,12 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	if err != nil {
 		return err
 	}
+	snapshotHash := sha256.Sum256(dbData)
 
 	payload := map[string]interface{}{
 		"user_id": userID,
 		"data":    encrypted,
+		"sha256":  fmt.Sprintf("%x", snapshotHash[:]),
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -660,6 +705,12 @@ func (m *SessionManager) saveSessionToJoBot(userID int) error {
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Failed to save session: status %d", resp.StatusCode)
 		return fmt.Errorf("save failed: %d", resp.StatusCode)
+	}
+	var acknowledgement struct {
+		SHA256 string `json:"sha256"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&acknowledgement); err != nil || subtle.ConstantTimeCompare([]byte(acknowledgement.SHA256), []byte(fmt.Sprintf("%x", snapshotHash[:]))) != 1 {
+		return errors.New("session backup acknowledgement did not verify snapshot")
 	}
 
 	log.Printf("✅ Saved session to jo_bot")
@@ -891,12 +942,14 @@ func (m *SessionManager) RemoveSession(userID int) {
 	sessionLifecycleTotal.WithLabelValues("deleted").Inc()
 }
 
-func (m *SessionManager) SaveSession(userID int) {
+func (m *SessionManager) SaveSession(userID int) error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if _, ok := m.sessions[userID]; ok {
-		m.saveSessionToJoBot(userID)
+	_, ok := m.sessions[userID]
+	m.mu.RUnlock()
+	if !ok {
+		return errSessionNotFound
 	}
+	return m.saveSessionToJoBot(userID)
 }
 
 func (s *UserSession) handleEvent(evt interface{}) (success bool) {
@@ -908,6 +961,10 @@ func (s *UserSession) handleEvent(evt interface{}) (success bool) {
 	}
 
 	switch v := evt.(type) {
+	case *events.PairSuccess:
+		s.recordPairSuccess(v)
+	case *events.Connected:
+		s.recordPairConnected()
 	case *events.Message:
 		if !isDirectChatJID(v.Info.Chat) {
 			return
@@ -1418,8 +1475,19 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getQRHandler(w http.ResponseWriter, r *http.Request) {
-	userID := 0
-	fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
+	var userID int
+	var expectedSession *UserSession
+	if attemptID := r.URL.Query().Get("attempt"); attemptID != "" {
+		attempt := manager.pairingAttempt(attemptID)
+		if attempt == nil {
+			errorResponse(w, http.StatusUnauthorized, "invalid or expired pairing attempt")
+			return
+		}
+		userID = attempt.userID
+		expectedSession = attempt.session
+	} else {
+		fmt.Sscanf(r.URL.Query().Get("user_id"), "%d", &userID)
+	}
 	if userID == 0 {
 		errorResponse(w, http.StatusBadRequest, "user_id required")
 		return
@@ -1428,6 +1496,11 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 	session, ok := manager.acquireSSEListener(userID)
 	if !ok {
 		errorResponse(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if expectedSession != nil && session != expectedSession {
+		manager.releaseSSEListener(session)
+		errorResponse(w, http.StatusConflict, "pairing attempt session is no longer available")
 		return
 	}
 	defer manager.releaseSSEListener(session)
@@ -1825,7 +1898,10 @@ func saveSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manager.SaveSession(userID)
+	if err := manager.SaveSession(userID); err != nil {
+		errorResponse(w, http.StatusBadGateway, "session backup was not acknowledged")
+		return
+	}
 	jsonResponse(w, map[string]string{"status": "saved"})
 }
 
@@ -2285,6 +2361,8 @@ func registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/linq-numbers", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
 	mux.HandleFunc("/admin/linq-numbers/", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
 	mux.Handle("/metrics", metricsHandler())
+	mux.HandleFunc("/sessions/pairing-attempt", instrumentHandler("sessions_pairing_attempt", createPairingAttemptHandler))
+	mux.HandleFunc("/sessions/pairing-receipt", instrumentHandler("sessions_pairing_receipt", pairingReceiptHandler))
 	mux.HandleFunc("/sessions", instrumentHandler("sessions", createSessionHandler))
 	mux.HandleFunc("/sessions/qr", instrumentHandler("sessions_qr", getQRHandler))
 	mux.HandleFunc("/sessions/status", instrumentHandler("sessions_status", getStatusHandler))

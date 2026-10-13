@@ -716,7 +716,7 @@ func TestSaveSessionHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("returns success for existing session", func(t *testing.T) {
+	t.Run("fails when no durable backup is configured", func(t *testing.T) {
 		manager = setupTestManager(t)
 		mock := NewLoggedInMockClient()
 		injectMockSession(manager, 500, mock)
@@ -725,14 +725,11 @@ func TestSaveSessionHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		saveSessionHandler(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("expected 502, got %d", w.Code)
 		}
-
-		var resp map[string]string
-		json.NewDecoder(w.Body).Decode(&resp)
-		if resp["status"] != "saved" {
-			t.Errorf("expected status 'saved', got %q", resp["status"])
+		if strings.Contains(w.Body.String(), `"status":"saved"`) {
+			t.Error("save reported success without an upstream acknowledgement")
 		}
 	})
 }
