@@ -860,6 +860,43 @@ func (m *SessionManager) waitForLogin(session *UserSession) bool {
 	}
 }
 
+// reconnectRegisteredNumbers connects each already-paired shared number at
+// startup. A healthy number simply reconnects (so it can receive inbound);
+// a number WhatsApp logged out while we were down surfaces its dead state here
+// (ErrDeviceDeleted, or an *events.LoggedOut once connected) and self-heals via
+// invalidateLoggedOutNumberSession, leaving it ready for a fresh QR re-pair.
+// Never-paired numbers (no stored device) are left untouched.
+func (m *SessionManager) reconnectRegisteredNumbers() {
+	m.mu.RLock()
+	ids := make([]int, 0, len(m.numberSessions))
+	for id := range m.numberSessions {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		state, err := m.getOrCreateLinqNumberSession(id)
+		if err != nil {
+			log.Printf("Startup: could not load number session number=%d: %v", id, err)
+			continue
+		}
+		session := state.session
+		if session == nil || session.Client.GetStore().GetID() == nil {
+			// No stored device yet; awaiting its first pairing.
+			continue
+		}
+		if session.Client.IsConnected() {
+			continue
+		}
+		if err := session.Client.Connect(); err != nil && !strings.Contains(err.Error(), "already connected") {
+			if errors.Is(err, store.ErrDeviceDeleted) {
+				m.invalidateLoggedOutNumberSession(id, session)
+				continue
+			}
+			log.Printf("Startup: number session reconnect failed number=%d: %v", id, err)
+		}
+	}
+}
+
 func (m *SessionManager) getOperationalSession(userID int) (*UserSession, error) {
 	session := m.GetSession(userID)
 	if session == nil {
@@ -965,6 +1002,23 @@ func (s *UserSession) handleEvent(evt interface{}) (success bool) {
 		s.recordPairSuccess(v)
 	case *events.Connected:
 		s.recordPairConnected()
+	case *events.LoggedOut:
+		// WhatsApp invalidated this device remotely. Nothing reconnects a dead
+		// credential, so tear the local session down and require re-pairing.
+		// Run the teardown asynchronously: close() waits on eventWG, which this
+		// handler is currently holding, so calling it inline would deadlock.
+		if s.Kind == LinqNumberSessionKind {
+			numberID := s.LinqNumberID
+			go manager.invalidateLoggedOutNumberSession(numberID, s)
+		} else {
+			userID := s.UserID
+			go func() {
+				if err := manager.DiscardDeletedSession(userID, s); err != nil {
+					log.Printf("Failed to discard logged-out WhatsApp session user=%d: %v", userID, err)
+				}
+			}()
+		}
+		return
 	case *events.Message:
 		if !isDirectChatJID(v.Info.Chat) {
 			return
@@ -2417,6 +2471,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	registerHandlers(mux)
+
+	// Reconnect already-paired shared numbers so inbound works immediately and
+	// any session WhatsApp logged out while we were down self-heals to a
+	// re-pairable state. Runs in the background so it never delays serving.
+	go manager.reconnectRegisteredNumbers()
 
 	log.Printf("🚀 WhatsApp server listening on %s", listenAddress)
 	log.Printf("📁 Data directory: %s", dataDir)

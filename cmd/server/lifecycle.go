@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -132,6 +133,74 @@ func (m *SessionManager) DiscardDeletedSession(userID int, expected *UserSession
 		return fmt.Errorf("failed to delete persisted invalid session: %w", err)
 	}
 	return nil
+}
+
+// removeNumberSessionDatabase deletes the on-disk device store for a shared
+// number so the next pairing starts from an empty device and shows a QR code.
+func removeNumberSessionDatabase(numberID int, dbPath string) {
+	if dbPath == "" {
+		return
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Printf("Failed to delete number session database number=%d: %v", numberID, err)
+		}
+	}
+}
+
+// invalidateLoggedOutNumberSession tears down a shared-number session whose
+// device WhatsApp invalidated remotely. Nothing reconnects a dead credential,
+// so we close the client, delete the stored device, and keep only the registry
+// entry (id + phone) so a fresh QR re-pair reuses the same number. Mirrors
+// DiscardDeletedSession for the user-session path.
+func (m *SessionManager) invalidateLoggedOutNumberSession(numberID int, expected *UserSession) {
+	m.mu.Lock()
+	state := m.numberSessions[numberID]
+	if state == nil || state.session == nil || state.session != expected {
+		m.mu.Unlock()
+		return
+	}
+	session := state.session
+	state.session = nil
+	state.pairingStarted = false
+	dbPath := session.DBPath
+	m.mu.Unlock()
+
+	session.close(false)
+	removeNumberSessionDatabase(numberID, dbPath)
+	activeSessions.Dec()
+	sessionLifecycleTotal.WithLabelValues("invalidated").Inc()
+	log.Printf("Discarded logged-out WhatsApp number session number=%d; QR re-pairing required", numberID)
+}
+
+// forceRelinkNumber unconditionally clears a shared number's stored device,
+// even when the local credential still claims to be logged in (the classic
+// "paired locally but logged out on the phone" state). The next pairing then
+// starts from an empty device and shows a fresh QR code. Keeps the registry
+// entry so the same number is re-paired.
+func (m *SessionManager) forceRelinkNumber(numberID int) {
+	m.mu.Lock()
+	state := m.numberSessions[numberID]
+	if state == nil {
+		m.mu.Unlock()
+		return
+	}
+	session := state.session
+	state.session = nil
+	state.pairingStarted = false
+	dbPath := filepath.Join(m.dataDir, fmt.Sprintf("linq_number_%d.db", numberID))
+	if session != nil && session.DBPath != "" {
+		dbPath = session.DBPath
+	}
+	m.mu.Unlock()
+
+	if session != nil {
+		session.close(false)
+		activeSessions.Dec()
+		sessionLifecycleTotal.WithLabelValues("invalidated").Inc()
+	}
+	removeNumberSessionDatabase(numberID, dbPath)
+	log.Printf("Forced re-link for WhatsApp number=%d; QR re-pairing required", numberID)
 }
 
 func (m *SessionManager) acquireSSEListener(userID int) (*UserSession, bool) {

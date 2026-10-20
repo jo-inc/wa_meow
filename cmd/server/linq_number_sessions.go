@@ -185,6 +185,40 @@ func (m *SessionManager) authorizePairingToken(numberID int, encoded string) *nu
 	return state
 }
 
+// mintPairingToken issues a fresh short-lived pairing token for an already
+// registered number, without re-registering it. jo_bot (which holds only the
+// internal token) mints one over the internal channel so the passkey-gated
+// joprod repair proxy can drive the QR pairing page on the operator's behalf.
+func (m *SessionManager) mintPairingToken(numberID int) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.numberSessions[numberID]
+	if state == nil {
+		return "", false
+	}
+	var token [32]byte
+	if _, err := io.ReadFull(rand.Reader, token[:]); err != nil {
+		return "", false
+	}
+	state.pairingToken = sha256.Sum256(token[:])
+	state.tokenExpiresAt = time.Now().Add(pairingTokenTTL)
+	return base64.RawURLEncoding.EncodeToString(token[:]), true
+}
+
+// pairingTokenLinqNumberHandler mints a fresh short-lived pairing token for an
+// already-registered number over the internal channel. The passkey-gated
+// joprod repair proxy uses it to open the QR pairing flow for an operator
+// without ever holding the bridge admin token. 404 when the number is unknown.
+func pairingTokenLinqNumberHandler(w http.ResponseWriter, numberID int) {
+	token, ok := manager.mintPairingToken(numberID)
+	if !ok {
+		errorResponse(w, http.StatusNotFound, "not found")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, map[string]string{"token": token})
+}
+
 func (m *SessionManager) getOrCreateLinqNumberSession(numberID int) (*numberSessionState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -396,6 +430,8 @@ func linqNumberInternalHandler(w http.ResponseWriter, r *http.Request) {
 		streamLinqNumberEvents(w, r, numberID)
 	case r.Method == http.MethodGet && len(parts) == 5 && parts[3] == "events" && parts[4] == "status":
 		statusLinqNumberEventsHandler(w, numberID)
+	case r.Method == http.MethodGet && len(parts) == 4 && parts[3] == "pairing-token":
+		pairingTokenLinqNumberHandler(w, numberID)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "events" && parts[4] == "checkpoint":
 		checkpointLinqNumberEventHandler(w, r, numberID)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "events" && parts[4] == "ack":
@@ -766,6 +802,12 @@ func linqNumberAdminHandler(w http.ResponseWriter, r *http.Request) {
 		streamNumberQR(w, r, state)
 	case "status":
 		statusLinqNumberPairing(w, state)
+	case "relink":
+		// Force-clear a locally-stored-but-remotely-logged-out device so the
+		// next QR stream starts fresh. Token-authorized like the other actions.
+		manager.forceRelinkNumber(numberID)
+		w.Header().Set("Cache-Control", "no-store")
+		jsonResponse(w, map[string]string{"status": "relink_ready"})
 	default:
 		errorResponse(w, http.StatusNotFound, "not found")
 	}
@@ -1241,7 +1283,7 @@ const base=location.pathname.replace(/\/pair$/, '');
 const state=document.getElementById('state'), box=document.getElementById('qr');
 const source=new EventSource(base+'/qr?token='+encodeURIComponent(token||''));
 source.addEventListener('qr', event=>{const image=document.createElement('img');image.alt='WhatsApp device-linking QR code';image.src='data:image/png;base64,'+event.data;box.replaceChildren(image);state.textContent='Scan this QR code with the configured phone.';});
-source.addEventListener('complete', async ()=>{source.close();state.textContent='Checking the paired account…';try{const response=await fetch(base+'/status?token='+encodeURIComponent(token||''),{cache:'no-store'});const status=await response.json();box.replaceChildren();state.textContent=status.verified?'Account verified. Number pairing is complete; messaging is not enabled by this flow.':'Paired account does not match the registered phone. Outbound use remains disabled.';}catch{state.textContent='Could not verify the paired account.';}});
+source.addEventListener('complete', async ()=>{source.close();state.textContent='Checking the paired account…';try{const response=await fetch(base+'/status?token='+encodeURIComponent(token||''),{cache:'no-store'});const status=await response.json();box.replaceChildren();if(status.verified){state.textContent='Account verified. Number pairing is complete; messaging is not enabled by this flow.';}else{state.textContent='This number is linked locally but not verified — it may have been logged out on the phone. Re-link to scan a new QR code.';const button=document.createElement('button');button.textContent='Re-link this number';button.onclick=async()=>{button.disabled=true;state.textContent='Clearing the old link…';try{await fetch(base+'/relink?token='+encodeURIComponent(token||''),{cache:'no-store'});location.reload();}catch{state.textContent='Could not start re-linking. Reload to retry.';button.disabled=false;}};box.replaceChildren(button);}}catch{state.textContent='Could not verify the paired account.';}});
 source.addEventListener('timeout',()=>{source.close();state.textContent='QR code expired. Register again for a new pairing link.';});
 source.addEventListener('error',()=>{state.textContent='Pairing connection interrupted. Reload this page to retry.';});
 </script></html>`
