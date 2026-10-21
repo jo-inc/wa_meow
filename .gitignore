@@ -1,5 +1,6 @@
 # Binaries
 whatsapp-server
+/server
 *.exe
 *.dll
 *.so
@@ -23,6 +24,11 @@ whatsapp-server
 # OS
 .DS_Store
 Thumbs.db
+
+# Stray agent/memory files (not part of the repo)
+ABOUT.md
+CRON.md
+MEMORY.md
 
 # Temporary files
 tmp/
