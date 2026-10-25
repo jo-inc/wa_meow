@@ -2413,6 +2413,7 @@ func registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/health", instrumentHandler("health", healthHandler))
 	mux.HandleFunc("/internal/linq-numbers/", instrumentHandler("internal_linq_numbers", linqNumberInternalHandler))
 	mux.HandleFunc("/admin/linq-numbers", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
+	mux.HandleFunc("/admin/sessions/count", instrumentHandler("admin_sessions_count", sessionCountHandler))
 	mux.HandleFunc("/admin/linq-numbers/", instrumentHandler("admin_linq_numbers", linqNumberAdminHandler))
 	mux.Handle("/metrics", metricsHandler())
 	mux.HandleFunc("/sessions/pairing-attempt", instrumentHandler("sessions_pairing_attempt", createPairingAttemptHandler))
