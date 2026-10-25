@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -168,6 +169,68 @@ func (m *SessionManager) registerLinqNumber(record linqNumberRecord) (string, er
 	state.pairingToken = sha256.Sum256(token[:])
 	state.tokenExpiresAt = time.Now().Add(pairingTokenTTL)
 	return base64.RawURLEncoding.EncodeToString(token[:]), nil
+}
+
+// migrateLinqNumber moves an already-registered shared number to a new phone
+// (for example after the old number was banned and the operator switched SIMs).
+// The number id is preserved, so every joprod binding keyed to that id carries
+// over untouched and only the registered phone changes. The old (now invalid)
+// device credential is cleared and a fresh pairing token is minted so the new
+// phone can be re-linked by QR. Inbox and delivery-receipt history under the id
+// are left in place. This is the only path allowed to change a registered
+// phone; ordinary registration still refuses it. Returns the previous phone,
+// the new phone, and a fresh pairing token.
+func (m *SessionManager) migrateLinqNumber(numberID int, newPhoneRaw string) (oldPhone, newPhone, token string, err error) {
+	phone, ok := normalizeE164(newPhoneRaw)
+	if numberID <= 0 || !ok {
+		return "", "", "", fmt.Errorf("number id and E.164 phone required")
+	}
+	m.mu.Lock()
+	if m.numberRegistryErr != nil {
+		m.mu.Unlock()
+		return "", "", "", m.numberRegistryErr
+	}
+	state := m.numberSessions[numberID]
+	if state == nil {
+		m.mu.Unlock()
+		return "", "", "", fmt.Errorf("number is not registered")
+	}
+	oldPhone = state.Phone
+	if oldPhone == phone {
+		m.mu.Unlock()
+		return "", "", "", fmt.Errorf("new phone matches the current registered phone")
+	}
+	for id, existing := range m.numberSessions {
+		if id != numberID && existing.Phone == phone {
+			m.mu.Unlock()
+			return "", "", "", fmt.Errorf("phone is already registered to another number id")
+		}
+	}
+	state.Phone = phone
+	if err := m.saveNumberRegistryLocked(); err != nil {
+		state.Phone = oldPhone // roll back the in-memory change on persist failure
+		m.mu.Unlock()
+		log.Printf("Failed to persist migration for WhatsApp number id=%d: %v", numberID, err)
+		return "", "", "", fmt.Errorf("persist migration")
+	}
+	var raw [32]byte
+	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
+		m.mu.Unlock()
+		return "", "", "", fmt.Errorf("create pairing token")
+	}
+	state.pairingToken = sha256.Sum256(raw[:])
+	state.tokenExpiresAt = time.Now().Add(pairingTokenTTL)
+	token = base64.RawURLEncoding.EncodeToString(raw[:])
+	m.mu.Unlock()
+
+	// Clear the old (banned/invalid) device so the next QR stream starts fresh
+	// for the new phone. forceRelinkNumber takes m.mu itself, so it must run
+	// after unlocking. It nulls the session and deletes linq_number_<id>.db but
+	// leaves the inbox and delivery-receipt directories (keyed by id) intact.
+	m.forceRelinkNumber(numberID)
+
+	log.Printf("Migrated WhatsApp number id=%d to a new registered phone; QR re-pairing required", numberID)
+	return oldPhone, phone, token, nil
 }
 
 func (m *SessionManager) authorizePairingToken(numberID int, encoded string) *numberSessionState {
@@ -448,6 +511,8 @@ func linqNumberInternalHandler(w http.ResponseWriter, r *http.Request) {
 		sendInternalLinqNumberMediaHandler(w, r, numberID, linqNumberMediaDocument)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "messages" && parts[4] == "audio":
 		sendInternalLinqNumberMediaHandler(w, r, numberID, linqNumberMediaAudio)
+	case r.Method == http.MethodPost && len(parts) == 4 && parts[3] == "migrate":
+		migrateLinqNumberHandler(w, r, numberID)
 	case r.Method == http.MethodPost && len(parts) == 5 && parts[3] == "media" && parts[4] == "download":
 		downloadInternalLinqNumberMediaHandler(w, r, numberID)
 	default:
@@ -1197,6 +1262,46 @@ func sendLinqNumberTextHandler(w http.ResponseWriter, r *http.Request, numberID 
 		Text:        request.Text,
 		DeliveryKey: request.DeliveryKey,
 	}, false)
+}
+
+// migrateLinqNumberHandler moves an existing shared number to a new phone and
+// returns a fresh pairing link so the operator can re-link the new phone by QR.
+// The number id is preserved, so joprod bindings and this number's inbox and
+// receipt history carry over untouched. Internal-token guarded by the caller
+// (joprod holds only the internal token); joprod orchestrates the matching DB
+// phone flip and then proxies the returned pairing link behind its passkey.
+func migrateLinqNumberHandler(w http.ResponseWriter, r *http.Request, numberID int) {
+	var request struct {
+		Phone string `json:"phone"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid migration request")
+		return
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		errorResponse(w, http.StatusBadRequest, "invalid migration request")
+		return
+	}
+	oldPhone, newPhone, token, err := manager.migrateLinqNumber(numberID, request.Phone)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "persist") || strings.Contains(err.Error(), "registry") || strings.Contains(err.Error(), "pairing token") {
+			status = http.StatusInternalServerError
+		}
+		errorResponse(w, status, err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, map[string]string{
+		"status":      "migrated",
+		"old_phone":   oldPhone,
+		"new_phone":   newPhone,
+		"pairing_url": fmt.Sprintf("/admin/linq-numbers/%d/pair?token=%s", numberID, token),
+	})
 }
 
 func streamNumberQR(w http.ResponseWriter, r *http.Request, state *numberSessionState) {
