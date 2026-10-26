@@ -41,6 +41,9 @@ type WhatsAppClient interface {
 
 	// Media retry - request phone to re-upload media
 	SendMediaRetryReceipt(ctx context.Context, message *types.MessageInfo, mediaKey []byte) error
+
+	// Calls - Jo has no voice/video surface, so incoming calls are rejected.
+	RejectCall(ctx context.Context, callFrom types.JID, callID string) error
 }
 
 // DeviceStore abstracts access to device/store information
@@ -83,6 +86,10 @@ func (w *realClientWrapper) GetQRChannel(ctx context.Context) (<-chan whatsmeow.
 
 func (w *realClientWrapper) SendMessage(ctx context.Context, to types.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	return w.client.SendMessage(ctx, to, message, extra...)
+}
+
+func (w *realClientWrapper) RejectCall(ctx context.Context, callFrom types.JID, callID string) error {
+	return w.client.RejectCall(ctx, callFrom, callID)
 }
 
 func (w *realClientWrapper) SendChatPresence(ctx context.Context, jid types.JID, presence types.ChatPresence, media types.ChatPresenceMedia) error {

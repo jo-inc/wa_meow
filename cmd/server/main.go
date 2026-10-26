@@ -151,6 +151,12 @@ type UserSession struct {
 	pairingMu         sync.Mutex
 	pairingAttempt    *pairingAttempt
 	pairingGeneration uint64
+
+	// callOffenders tracks callers we've already sent the decline message to,
+	// so repeat callers are rejected without being re-messaged. Keyed by bare
+	// caller JID. Lazily initialized under callOffendersMu.
+	callOffenders   map[string]int
+	callOffendersMu sync.Mutex
 }
 
 func (s *UserSession) cacheBudget() *mediaCacheBudget {
@@ -1018,6 +1024,12 @@ func (s *UserSession) handleEvent(evt interface{}) (success bool) {
 				}
 			}()
 		}
+		return
+	case *events.CallOffer:
+		go s.handleIncomingCall(v.CallCreator, v.CallID, "")
+		return
+	case *events.CallOfferNotice:
+		go s.handleIncomingCall(v.CallCreator, v.CallID, v.Media)
 		return
 	case *events.Message:
 		if !isDirectChatJID(v.Info.Chat) {

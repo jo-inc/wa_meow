@@ -34,6 +34,9 @@ type MockWhatsAppClient struct {
 
 	// Call tracking
 	Calls []MockCall
+
+	// Configurable return value for call rejection
+	RejectCallError error
 }
 
 // MockCall records a method invocation
@@ -198,6 +201,11 @@ func (m *MockWhatsAppClient) SendMessage(ctx context.Context, to types.JID, mess
 func (m *MockWhatsAppClient) SendChatPresence(ctx context.Context, jid types.JID, presence types.ChatPresence, media types.ChatPresenceMedia) error {
 	m.recordCall("SendChatPresence", ctx, jid, presence, media)
 	return m.SendPresenceError
+}
+
+func (m *MockWhatsAppClient) RejectCall(ctx context.Context, callFrom types.JID, callID string) error {
+	m.recordCall("RejectCall", callFrom, callID)
+	return m.RejectCallError
 }
 
 func (m *MockWhatsAppClient) Upload(ctx context.Context, plaintext []byte, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
