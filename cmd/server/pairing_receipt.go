@@ -365,6 +365,7 @@ qrDrained:
 	case <-session.LoginDone:
 	default:
 	}
+	session.clearQR()
 	qrChan, err := session.Client.GetQRChannel(context.Background())
 	if err != nil {
 		return fmt.Errorf("create QR channel: %w", err)
@@ -376,12 +377,10 @@ qrDrained:
 		for event := range qrChan {
 			switch event.Event {
 			case "code":
-				select {
-				case session.QRChannel <- event.Code:
-				default:
-				}
+				session.publishQR(event.Code)
 			case "success":
 				session.recordQRSuccess(generation)
+				session.clearQR()
 				select {
 				case session.LoginDone <- true:
 				default:

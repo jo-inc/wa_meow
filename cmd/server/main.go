@@ -152,11 +152,26 @@ type UserSession struct {
 	pairingAttempt    *pairingAttempt
 	pairingGeneration uint64
 
+	// qrMu guards the most recently generated pairing QR so a newly connected
+	// SSE subscriber can be shown the current code immediately. The QR channel
+	// is one-shot: whoever reads first drains it, so a reconnecting stream used
+	// to hang on "Preparing a secure QR code…" until whatsmeow pushed the next
+	// code. Caching and replaying the latest code removes that hang.
+	qrMu     sync.Mutex
+	lastQR   string
+	lastQRAt time.Time
+
 	// callOffenders tracks callers we've already sent the decline message to,
 	// so repeat callers are rejected without being re-messaged. Keyed by bare
 	// caller JID. Lazily initialized under callOffendersMu.
 	callOffenders   map[string]int
 	callOffendersMu sync.Mutex
+
+	// videoOffenders tracks senders we've already told we can't process video,
+	// so repeat video messages are dropped silently. Keyed by bare sender JID.
+	// Lazily initialized under videoOffendersMu.
+	videoOffenders   map[string]int
+	videoOffendersMu sync.Mutex
 }
 
 func (s *UserSession) cacheBudget() *mediaCacheBudget {
@@ -1298,6 +1313,13 @@ func (s *UserSession) handleEvent(evt interface{}) (success bool) {
 			// Don't set hasContent since we've already sent the events
 		}
 
+		// Video is not supported. Tell the sender once, then drop it silently on
+		// repeats so a persistent sender can't spam Jo. Never forwarded to the
+		// model (hasContent stays false).
+		if v.Message.VideoMessage != nil {
+			go s.declineUnsupportedVideo(v.Info.Chat, v.Info.Sender)
+		}
+
 		if hasContent {
 			// Record inbound message metric
 			msgType := "text"
@@ -1486,6 +1508,7 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		case <-session.LoginDone:
 		default:
 		}
+		session.clearQR()
 
 		qrChan, _ := session.Client.GetQRChannel(context.Background())
 		err := session.Client.Connect()
@@ -1500,11 +1523,9 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			for evt := range qrChan {
 				if evt.Event == "code" {
-					select {
-					case session.QRChannel <- evt.Code:
-					default:
-					}
+					session.publishQR(evt.Code)
 				} else if evt.Event == "success" {
+					session.clearQR()
 					select {
 					case session.LoginDone <- true:
 					default:
@@ -1538,6 +1559,49 @@ func createSessionHandler(w http.ResponseWriter, r *http.Request) {
 		"user_id": req.UserID,
 		"phone":   session.Client.GetStore().GetID().User,
 	})
+}
+
+// qrReplayValidity bounds how long a cached QR code may be replayed to a
+// newly connected subscriber. whatsmeow rotates codes well inside this window,
+// so a replayed code is either still scannable or promptly superseded by the
+// next fresh push delivered through the select loop below.
+const qrReplayValidity = 60 * time.Second
+
+// publishQR records the latest pairing QR and forwards it to any current
+// subscriber without blocking. The cached copy lets a later subscriber render
+// the code immediately instead of waiting for whatsmeow's next push.
+func (s *UserSession) publishQR(code string) {
+	if code == "" {
+		return
+	}
+	s.qrMu.Lock()
+	s.lastQR = code
+	s.lastQRAt = time.Now()
+	s.qrMu.Unlock()
+	select {
+	case s.QRChannel <- code:
+	default:
+	}
+}
+
+// latestQR returns the most recent QR code if it is recent enough to be worth
+// replaying to a freshly connected subscriber.
+func (s *UserSession) latestQR() (string, bool) {
+	s.qrMu.Lock()
+	defer s.qrMu.Unlock()
+	if s.lastQR == "" || time.Since(s.lastQRAt) > qrReplayValidity {
+		return "", false
+	}
+	return s.lastQR, true
+}
+
+// clearQR drops any cached QR. Called when a new attempt starts or a login
+// succeeds so a stale code is never replayed.
+func (s *UserSession) clearQR() {
+	s.qrMu.Lock()
+	s.lastQR = ""
+	s.lastQRAt = time.Time{}
+	s.qrMu.Unlock()
 }
 
 func getQRHandler(w http.ResponseWriter, r *http.Request) {
@@ -1582,6 +1646,12 @@ func getQRHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timeout := time.After(2 * time.Minute)
+	// Replay the current QR immediately so a reconnecting subscriber is not left
+	// waiting on the one-shot channel for whatsmeow's next push.
+	if code, ok := session.latestQR(); ok {
+		fmt.Fprintf(w, "event: qr\ndata: %s\n\n", code)
+		flusher.Flush()
+	}
 	for {
 		select {
 		case code := <-session.QRChannel:

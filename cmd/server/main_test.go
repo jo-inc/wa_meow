@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -691,6 +692,82 @@ func TestGetQRHandler(t *testing.T) {
 			t.Errorf("expected 404, got %d", w.Code)
 		}
 	})
+}
+
+func TestSessionQRCache(t *testing.T) {
+	t.Run("publish then replay returns latest code", func(t *testing.T) {
+		s := &UserSession{QRChannel: make(chan string, 10)}
+		s.publishQR("code-one")
+		s.publishQR("code-two")
+		if got, ok := s.latestQR(); !ok || got != "code-two" {
+			t.Fatalf("expected latest cached code 'code-two', got %q ok=%v", got, ok)
+		}
+	})
+
+	t.Run("empty code is ignored", func(t *testing.T) {
+		s := &UserSession{QRChannel: make(chan string, 10)}
+		s.publishQR("")
+		if _, ok := s.latestQR(); ok {
+			t.Fatal("expected no cached code after publishing empty string")
+		}
+	})
+
+	t.Run("clear drops cached code", func(t *testing.T) {
+		s := &UserSession{QRChannel: make(chan string, 10)}
+		s.publishQR("code")
+		s.clearQR()
+		if _, ok := s.latestQR(); ok {
+			t.Fatal("expected no cached code after clearQR")
+		}
+	})
+
+	t.Run("stale code is not replayed", func(t *testing.T) {
+		s := &UserSession{QRChannel: make(chan string, 10)}
+		s.publishQR("code")
+		s.qrMu.Lock()
+		s.lastQRAt = time.Now().Add(-qrReplayValidity - time.Second)
+		s.qrMu.Unlock()
+		if _, ok := s.latestQR(); ok {
+			t.Fatal("expected stale cached code to be rejected")
+		}
+	})
+}
+
+// TestGetQRHandlerReplaysCachedCode proves the core fix: a subscriber that
+// connects after the one-shot QR channel was already drained still receives the
+// current code immediately instead of hanging on "Preparing a secure QR code".
+func TestGetQRHandlerReplaysCachedCode(t *testing.T) {
+	manager = setupTestManager(t)
+	mock := NewMockClient()
+	session := injectMockSession(manager, 700, mock)
+	// Simulate a code already produced and drained by a prior subscriber: the
+	// cache holds it but the channel is empty.
+	session.publishQR("replayed-qr")
+	<-session.QRChannel
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/sessions/qr?user_id=700", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		getQRHandler(w, req)
+		close(done)
+	}()
+
+	// The handler should flush the replayed code promptly, then the cancel ends
+	// the stream.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after context cancel")
+	}
+
+	if body := w.Body.String(); !strings.Contains(body, "event: qr") || !strings.Contains(body, "replayed-qr") {
+		t.Fatalf("expected replayed QR in stream, got %q", body)
+	}
 }
 
 func TestSaveSessionHandler(t *testing.T) {
