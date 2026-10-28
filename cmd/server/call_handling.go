@@ -13,6 +13,10 @@ import (
 // voice or video surface.
 const callDeclineMessage = "Jo doesn't do audio or video calls. Send me a text message and I'll help from there."
 
+// videoDeclineMessage is sent once to anyone who sends a video message, since
+// the bridge has no video processing path.
+const videoDeclineMessage = "I can't process videos yet. Send me a text message and I'll help from there."
+
 // handleIncomingCall rejects an incoming WhatsApp call and, the first time a
 // given number calls, replies explaining that Jo has no call surface. Jo has
 // no voice/video surface, so accepting is never correct. It runs in its own
@@ -44,5 +48,34 @@ func (s *UserSession) handleIncomingCall(callFrom types.JID, callID, media strin
 		} else {
 			log.Printf("[call] sent call-decline message to %s", piiFingerprint(caller.String()))
 		}
+	}
+}
+
+// declineUnsupportedVideo tells a sender once that Jo can't process video, then
+// drops repeat videos silently so a persistent sender can't spam Jo. The video
+// is never forwarded to the model. It runs in its own goroutine. chat is the
+// reply target; sender identifies the person for one-time dedupe.
+func (s *UserSession) declineUnsupportedVideo(chat, sender types.JID) {
+	ctx := context.Background()
+	key := sender.ToNonAD().String()
+
+	s.videoOffendersMu.Lock()
+	if s.videoOffenders == nil {
+		s.videoOffenders = make(map[string]int)
+	}
+	s.videoOffenders[key]++
+	firstVideo := s.videoOffenders[key] == 1
+	s.videoOffendersMu.Unlock()
+
+	if !firstVideo {
+		log.Printf("[video] dropped repeat video from %s (already notified)", piiFingerprint(key))
+		return
+	}
+
+	msg := &waE2E.Message{Conversation: proto.String(videoDeclineMessage)}
+	if _, err := s.Client.SendMessage(ctx, chat, msg); err != nil {
+		log.Printf("[video] decline message failed for %s: %v", piiFingerprint(key), err)
+	} else {
+		log.Printf("[video] sent video-unsupported message to %s", piiFingerprint(key))
 	}
 }

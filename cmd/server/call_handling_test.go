@@ -7,6 +7,24 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+func TestDeclineUnsupportedVideo(t *testing.T) {
+	chat := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	sender := chat
+
+	t.Run("messages sender once, drops repeats silently", func(t *testing.T) {
+		mock := NewLoggedInMockClient()
+		session := &UserSession{UserID: 1, Client: mock}
+
+		for i := 0; i < 3; i++ {
+			session.declineUnsupportedVideo(chat, sender)
+		}
+
+		if sends := mock.GetCallsByMethod("SendMessage"); len(sends) != 1 {
+			t.Errorf("expected exactly 1 video-decline message across repeat videos, got %d", len(sends))
+		}
+	})
+}
+
 func TestHandleIncomingCall(t *testing.T) {
 	makeSession := func(mock *MockWhatsAppClient) *UserSession {
 		return &UserSession{
